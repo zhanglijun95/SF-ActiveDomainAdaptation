@@ -1,0 +1,72 @@
+seed: 42
+
+run:
+  dir: runs/dev
+
+data:
+  dataset_name: office_home
+  root: data/office_home
+  source_domain: Art
+  target_domain: Clipart
+  num_classes: 65
+  image_size: 224
+  list_files:
+    source_train: lists/source_train.txt
+    source_val: lists/source_val.txt
+    target_adapt: lists/target_adapt.txt
+    target_test: lists/target_test.txt
+
+model:
+  backbone: resnet50
+  pretrained: true
+  bottleneck_dim: 256
+  bottleneck_relu: true
+  lora:
+    enabled: false
+    r: 8
+    alpha: 16
+    dropout: 0.0
+    target_modules:
+      - layer1.0.conv1
+      - layer1.0.conv2
+      - layer1.0.conv3
+      - layer2.0.conv1
+      - layer2.0.conv2
+      - layer2.0.conv3
+      - layer3.0.conv1
+      - layer3.0.conv2
+      - layer3.0.conv3
+      - layer4.0.conv1
+      - layer4.0.conv2
+      - layer4.0.conv3
+
+train:
+  source_epochs: 20
+  epochs: 5
+  batch_size: 64
+  num_workers: 4
+  lr: 0.01
+  weight_decay: 0.0005
+  use_scheduler: false
+  finetune_mode: lora_finetune
+
+eval:
+  batch_size: 128
+  num_workers: 4
+  monitor_source_val: true
+
+method:
+  num_rounds: 10
+  budget_total: 500
+  select_exclude: true
+  use_debias: true
+  debias_lambda: 1.0
+  prior_momentum: 0.9
+  score_use_margin: true
+  score_use_change: true
+  w_margin: 0.5
+  w_change: 0.5
+  use_pseudo: true
+  pseudo_keep_ratio: 0.5
+  use_aml: false
+  aml_weight: 1.0
