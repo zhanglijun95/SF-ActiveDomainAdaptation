@@ -5,17 +5,12 @@ from __future__ import annotations
 from typing import Any
 
 from torch import nn
-
+from peft import LoraConfig, get_peft_model
 
 def maybe_apply_lora(model: nn.Module, cfg: Any) -> nn.Module:
     lora_cfg = getattr(getattr(cfg, "model", object()), "lora", None)
     if lora_cfg is None or not getattr(lora_cfg, "enabled", False):
         return model
-
-    try:
-        from peft import LoraConfig, get_peft_model
-    except Exception as exc:  # pragma: no cover
-        raise RuntimeError("PEFT is required when LoRA is enabled") from exc
 
     target_modules = list(getattr(lora_cfg, "target_modules", []))
     r = int(getattr(lora_cfg, "r", 8))

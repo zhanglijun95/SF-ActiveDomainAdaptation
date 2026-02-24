@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 
-@dataclass
 class AttrDict(dict):
     def __getattr__(self, item: str) -> Any:
         try:

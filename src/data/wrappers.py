@@ -38,23 +38,21 @@ class LabelRouterDataset(Dataset):
 
 
 class IdFilteredDataset(Dataset):
-    """Filters samples by id using string mode."""
+    """Filters samples by id using mode on top of a routed dataset."""
 
     VALID_MODES = {"labeled", "pseudo", "pool"}
 
     def __init__(
         self,
-        base_ds: Dataset,
+        routed_ds: LabelRouterDataset,
         mode: str,
-        queried_ids: set[Any] | None = None,
-        pseudo_ids: set[Any] | None = None,
     ) -> None:
         if mode not in self.VALID_MODES:
             raise ValueError(f"Invalid mode: {mode}")
-        self.base_ds = base_ds
+        self.routed_ds = routed_ds
+        self.queried_ids = set(routed_ds.queried_ids)
+        self.pseudo_ids = set(routed_ds.pseudo_store.keys())
         self.mode = mode
-        self.queried_ids = queried_ids or set()
-        self.pseudo_ids = pseudo_ids or set()
         self.indices = self._build_indices()
 
     def _keep(self, sample_id: Any) -> bool:
@@ -66,8 +64,8 @@ class IdFilteredDataset(Dataset):
 
     def _build_indices(self) -> list[int]:
         indices: list[int] = []
-        for i in range(len(self.base_ds)):
-            sid = self.base_ds[i]["sample_id"]
+        for i in range(len(self.routed_ds)):
+            sid = self.routed_ds[i]["sample_id"]
             if self._keep(sid):
                 indices.append(i)
         return indices
@@ -76,7 +74,7 @@ class IdFilteredDataset(Dataset):
         return len(self.indices)
 
     def __getitem__(self, index: int) -> dict[str, Any]:
-        return self.base_ds[self.indices[index]]
+        return self.routed_ds[self.indices[index]]
 
 
 class TwoViewDataset(Dataset):

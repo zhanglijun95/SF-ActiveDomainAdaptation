@@ -1,0 +1,25 @@
+seed: 42
+
+run:
+  root_dir: runs
+
+data:
+  dataset_name: office_home
+  root: /home/ljzhang/data/sfada/office-home
+  source_domain: Art
+  num_classes: 65
+  image_size: 224
+
+model:
+  backbone: resnet50
+  pretrained: true
+  bottleneck_dim: 256
+  bottleneck_relu: true
+
+train:
+  source_epochs: 20
+  batch_size: 64
+  num_workers: 4
+  lr: 0.01
+  weight_decay: 0.0005
+  use_scheduler: false
