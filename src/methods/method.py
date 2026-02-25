@@ -227,7 +227,7 @@ class OurMethod:
         budget_k: int,
     ) -> tuple[str, RoundState, dict[str, Any]]:
         # A) load model M_{r-1}
-        model = build_model(self.cfg, num_classes=self.num_classes).to(self.device)
+        model = build_model(self.cfg).to(self.device)
         load_checkpoint(ckpt_in, model, load_optimizer=False)
 
         # B) selection pool from current state (exclude queried only)

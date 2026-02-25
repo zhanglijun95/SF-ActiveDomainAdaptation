@@ -49,7 +49,7 @@ def main() -> None:
     state = RoundState(round_idx=args.round_idx, queried_ids=set(), pseudo_store={})
     loaders = build_adapt_loaders(cfg, state)
 
-    model = build_model(cfg, num_classes=int(cfg.data.num_classes)).to(device)
+    model = build_model(cfg).to(device)
     ckpt_in = args.init_ckpt
     if ckpt_in is None:
         ckpt_in = str(_resolve_source_run_dir(cfg) / "ckpt" / "ckpt_last.pt")

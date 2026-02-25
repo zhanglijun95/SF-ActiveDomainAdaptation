@@ -25,7 +25,7 @@ def main() -> None:
     cfg = load_config(args.config)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    model = build_model(cfg, num_classes=int(cfg.data.num_classes)).to(device)
+    model = build_model(cfg).to(device)
     load_checkpoint(args.ckpt, model, load_optimizer=False)
 
     state = RoundState(round_idx=0, queried_ids=set(), pseudo_store={})

@@ -37,7 +37,7 @@ def main() -> None:
 
     loaders = build_pretrain_loaders(cfg)
 
-    model = build_model(cfg, num_classes=int(cfg.data.num_classes)).to(device)
+    model = build_model(cfg).to(device)
     apply_train_mode(cfg, model, mode="source_train")
 
     optimizer = build_optimizer(cfg, model)

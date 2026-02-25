@@ -10,8 +10,9 @@ from .lora import apply_finetune_mode, maybe_apply_lora
 from .resnet_head import ResNetBottleneckClassifier
 
 
-def build_model(cfg: Any, num_classes: int) -> nn.Module:
+def build_model(cfg: Any) -> nn.Module:
     model_cfg = cfg.model
+    num_classes = int(cfg.data.num_classes)
     model = ResNetBottleneckClassifier(
         backbone_name=model_cfg.backbone,
         num_classes=num_classes,
