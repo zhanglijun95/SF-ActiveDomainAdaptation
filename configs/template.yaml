@@ -1,26 +1,38 @@
 seed: 42
 
 run:
+  # Root folder for all outputs.
   root_dir: runs
 
 data:
+  # One of: office_home, office_31, visda_c
   dataset_name: office_home
+  # Dataset root path.
   root: /home/ljzhang/data/sfada/office-home
+  # Source domain used in source training and as source checkpoint key.
   source_domain: Art
+  # Target domain used in round-based adaptation.
   target_domain: Clipart
+  # Number of classes of current dataset.
   num_classes: 65
+  # Input image size.
   image_size: 224
 
 model:
-  # Which source checkpoint to initialize round 0 from: best | last
+  # Which source checkpoint to initialize method round 0 from: best | last
   source_ckpt: best
   backbone: resnet50
+  # Source stage: usually true (ImageNet init). Method stage can reuse source ckpt.
   pretrained: true
   bottleneck_dim: 256
   bottleneck_relu: true
   lora:
+    # For source training, set false (full finetune).
+    # For method adaptation, usually true.
     enabled: true
+    # Global fallback rank if rank_schedule is not provided for a layer.
     r: 8
+    # Stage-wise rank override.
     rank_schedule:
       layer1: 16
       layer2: 8
@@ -28,6 +40,7 @@ model:
       layer4: 2
     alpha: 16
     dropout: 0.0
+    # Wildcard patterns are supported (expanded to concrete conv module names).
     target_modules:
       - layer1.*.conv1
       - layer1.*.conv2
@@ -43,6 +56,9 @@ model:
       - layer4.*.conv3
 
 train:
+  # Used by src/engine/train_source.py
+  source_epochs: 20
+  # Used by method stage and optional single-stage finetune entry.
   epochs: 5
   batch_size: 64
   num_workers: 4
@@ -51,37 +67,41 @@ train:
   lr: 0.001
   weight_decay: 0.0005
   use_scheduler: false
+  # source_train or full_finetune or lora_finetune
   finetune_mode: lora_finetune
 
 eval:
   batch_size: 128
   num_workers: 4
+  # source ckpt selection for src/engine/eval_source.py: best | last
+  source_ckpt: best
+  # If true, evaluate source_val in adaptation rounds.
   monitor_source_val: true
 
 method:
   # Number of active adaptation rounds.
   num_rounds: 10
-  # Finetune epochs per round on (labeled + pseudo) loaders.
+  # Finetune epochs per round.
   round_epochs: 1
-  # Total oracle labeling budget over all rounds.
-  # int: absolute count, float in (0,1]: ratio of |target_adapt| (e.g., 0.1 -> 10%).
+  # Total oracle labeling budget across all rounds.
+  # int: absolute count, float in (0,1]: ratio of |target_adapt| (e.g., 0.1).
   budget_total: 500
 
-  # Query scoring: uncertainty (margin) + temporal change.
+  # Query score composition.
   score_use_margin: true
   score_use_change: true
   w_margin: 0.5
   w_change: 0.5
 
-  # Prior estimation / debias.
+  # Debias/prior options.
   use_debias: true
   debias_lambda: 1.0
   prior_momentum: 0.9
 
-  # Pseudo branch.
+  # Pseudo-label branch.
   use_pseudo: true
   pseudo_keep_ratio: 0.5
   # Total loss = CE_labeled + pseudo_loss_weight * CE/AML_pseudo
   pseudo_loss_weight: 1.0
   # AML shift: Delta_j = aml_lambda * log(1 / h_j).
-  aml_lambda: 1.0 # might be the same as debias_lambda
+  aml_lambda: 1.0

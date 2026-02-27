@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 from pathlib import Path
 from typing import Any
@@ -48,7 +49,6 @@ def build_static_eval_loaders(cfg: Any) -> dict[str, DataLoader]:
     """Build static eval loaders that do not change by round."""
     eval_tf = build_eval_transform(cfg)
     loaders: dict[str, DataLoader] = {}
-
     target_test = build_dataset(cfg, split="target_test", transform=eval_tf)
     loaders["target_test"] = _loader(
         target_test,
@@ -66,7 +66,6 @@ def build_static_eval_loaders(cfg: Any) -> dict[str, DataLoader]:
             num_workers=int(getattr(cfg.eval, "num_workers", 4)),
         )
     return loaders
-
 
 def build_round_select_pool_loader(cfg: Any, target_adapt_gt, round_state: Any) -> DataLoader:
     """Build selection pool loader for planning:
@@ -153,3 +152,47 @@ def build_adapt_loaders(cfg: Any, round_state: Any) -> dict[str, DataLoader]:
     out.update(build_round_train_loaders(cfg, target_adapt_gt, round_state))
     out.update(build_static_eval_loaders(cfg))
     return out
+
+
+################# For source_eval.py ###############
+def build_eval_loaders_for_source(cfg: Any) -> dict[str, DataLoader]:
+    """Build source-stage eval loaders: source_val (optional) + all target domains."""
+    eval_tf = build_eval_transform(cfg)
+    bs = int(getattr(getattr(cfg, "eval", object()), "batch_size", getattr(cfg.train, "batch_size", 64)))
+    nw = int(getattr(getattr(cfg, "eval", object()), "num_workers", getattr(cfg.train, "num_workers", 4)))
+    root = Path(cfg.data.root)
+    ds = str(cfg.data.dataset_name).strip().lower().replace("-", "_")
+    source_domain = str(cfg.data.source_domain)
+
+    loaders: dict[str, DataLoader] = {}
+    if getattr(getattr(cfg, "eval", object()), "monitor_source_val", False):
+        source_val = build_dataset(cfg, split="source_val", transform=eval_tf)
+        loaders["source_val"] = _loader(source_val, batch_size=bs, shuffle=False, num_workers=nw)
+
+    if ds in {"office_home", "office_31"}:
+        # Discover candidate domains from folders that contain "<domain>_list.txt".
+        domains: list[str] = []
+        for child in root.iterdir():
+            if not child.is_dir():
+                continue
+            list_file = child / f"{child.name}_list.txt"
+            if list_file.exists():
+                domains.append(child.name)
+        for dom in sorted(domains):
+            if dom.lower() == source_domain.lower():
+                continue
+            cfg_t = deepcopy(cfg)
+            cfg_t.data.target_domain = dom
+            target_ds = build_dataset(cfg_t, split="target_test", transform=eval_tf)
+            loaders[f"target_test:{dom}"] = _loader(target_ds, batch_size=bs, shuffle=False, num_workers=nw)
+        return loaders
+
+    if ds == "visda_c":
+        # Project convention: target_adapt and target_test are validation split.
+        cfg_t = deepcopy(cfg)
+        cfg_t.data.target_domain = "validation"
+        target_ds = build_dataset(cfg_t, split="target_test", transform=eval_tf)
+        loaders["target_test:validation"] = _loader(target_ds, batch_size=bs, shuffle=False, num_workers=nw)
+        return loaders
+
+    raise ValueError(f"Unsupported dataset for source eval loaders: {cfg.data.dataset_name}")

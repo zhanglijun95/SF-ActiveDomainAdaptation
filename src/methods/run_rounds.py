@@ -7,13 +7,13 @@ import argparse
 import torch
 
 from src.config import load_config
+from src.engine.utils import resolve_source_ckpt_path
 from src.methods.method import OurMethod, RoundState
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
-    parser.add_argument("--init-ckpt", required=True)
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -24,10 +24,12 @@ def main() -> None:
         round_idx=0,
         queried_ids=set(),
         pseudo_store={},
-        budget_total=int(cfg.method.budget_total),
+        budget_total=0,
         budget_used=0,
     )
-    method.run_all_rounds(ckpt_init=args.init_ckpt, state_init=state)
+    which = str(getattr(getattr(cfg, "model", object()), "source_ckpt", "best"))
+    ckpt_init = str(resolve_source_ckpt_path(cfg, which=which))
+    method.run_all_rounds(ckpt_init=ckpt_init, state_init=state)
 
 
 if __name__ == "__main__":

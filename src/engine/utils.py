@@ -4,31 +4,48 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 import torch
 import yaml
 
 from src.config import to_plain
-from src.models.lora import apply_finetune_mode
 
 
-def apply_train_mode(cfg: Any, model, mode: str) -> None:
-    _ = cfg
-    apply_finetune_mode(model, mode)
+def _slug(s: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", s.strip())
+
+
+def resolve_source_run_dir(cfg: Any) -> Path:
+    root = Path(getattr(cfg.run, "root_dir", "runs"))
+    dataset = _slug(str(cfg.data.dataset_name))
+    source = _slug(str(cfg.data.source_domain))
+    return root / "source" / dataset / source
+
+
+def resolve_source_ckpt_path(cfg: Any, which: str = "best") -> Path:
+    ckpt_dir = resolve_source_run_dir(cfg) / "ckpt"
+    key = str(which).strip().lower()
+    if key in {"best", "ckpt_best", "best_ckpt"}:
+        return ckpt_dir / "ckpt_best.pt"
+    if key in {"last", "latest", "ckpt_last"}:
+        return ckpt_dir / "ckpt_last.pt"
+    raise ValueError(f"Unsupported source checkpoint selector: {which}. Use one of: best, last")
 
 
 def build_optimizer(cfg: Any, model) -> torch.optim.Optimizer:
     lr = float(cfg.train.lr)
     wd = float(getattr(cfg.train, "weight_decay", 1e-4))
     params = [p for p in model.parameters() if p.requires_grad]
-    return torch.optim.SGD(params, lr=lr, momentum=0.9, weight_decay=wd, nesterov=True)
+    return torch.optim.Adam(params, lr=lr, weight_decay=wd)
+    # return torch.optim.SGD(params, lr=lr, momentum=0.9, weight_decay=wd, nesterov=True)
 
 
 def build_scheduler(cfg: Any, optimizer) -> Any:
     if not bool(getattr(cfg.train, "use_scheduler", False)):
         return None
-    max_epochs = int(cfg.train.epochs)
+    max_epochs = int(cfg.train.source_epochs)
     return torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_epochs)
 
 

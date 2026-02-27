@@ -38,9 +38,10 @@ def load_checkpoint(
     scheduler=None,
     scaler=None,
     load_optimizer: bool = False,
+    strict: bool = True,
 ) -> dict[str, Any]:
     state = torch.load(path, map_location="cpu")
-    model.load_state_dict(state["model"], strict=True)
+    model.load_state_dict(state["model"], strict=strict)
     if load_optimizer:
         if optimizer is not None and state.get("optimizer") is not None:
             optimizer.load_state_dict(state["optimizer"])

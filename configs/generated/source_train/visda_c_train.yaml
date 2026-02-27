@@ -1,0 +1,32 @@
+seed: 42
+
+run:
+  root_dir: runs
+
+data:
+  dataset_name: visda_c
+  root: /home/ljzhang/data/sfada/visda-c
+  source_domain: "train"
+  num_classes: 12
+  image_size: 224
+
+model:
+  backbone: resnet101
+  pretrained: true
+  bottleneck_dim: 256
+  bottleneck_relu: true
+
+train:
+  source_epochs: 20
+  batch_size: 64
+  num_workers: 4
+  log_every_iters: 714
+  lr: 0.0001
+  weight_decay: 0.0005
+  use_scheduler: true
+
+eval:
+  batch_size: 128
+  num_workers: 4
+  source_ckpt: best
+  monitor_source_val: true

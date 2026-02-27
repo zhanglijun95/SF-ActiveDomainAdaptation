@@ -19,17 +19,15 @@ def per_class_accuracy(
     num_classes: int,
 ) -> dict[str, Any]:
     acc_per_class: list[float] = []
-    support: list[int] = []
     for c in range(num_classes):
         mask = gt == c
         n = int(mask.sum().item())
-        support.append(n)
         if n == 0:
             acc_per_class.append(0.0)
         else:
             acc_per_class.append(float((pred[mask] == gt[mask]).float().mean().item()))
     mean_acc = float(sum(acc_per_class) / max(num_classes, 1))
-    return {"acc_per_class": acc_per_class, "mean_acc": mean_acc, "support": support}
+    return {"acc_per_class": acc_per_class, "mean_acc": mean_acc}
 
 
 def compute_classification_metrics(

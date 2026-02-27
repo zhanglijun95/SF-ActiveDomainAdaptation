@@ -17,10 +17,11 @@ from src.data.utils import (
     build_static_eval_loaders,
     build_target_adapt_base,
 )
-from src.engine.ckpt import load_checkpoint, save_checkpoint
+from src.engine.ckpt import load_checkpoint
 from src.engine.trainer import TargetFinetuneTrainer
-from src.engine.utils import apply_train_mode, build_optimizer, build_scheduler, save_json
+from src.engine.utils import build_optimizer, build_scheduler, save_json
 from src.models import build_model
+from src.models.lora import apply_finetune_mode
 
 from .utils import change_l1, debias_logits, estimate_prior, margin_from_prob, rank_norm, softmax
 
@@ -73,7 +74,7 @@ def _resolve_method_run_dir(cfg: Any) -> Path:
     ds = _slug(str(cfg.data.dataset_name))
     src = _slug(str(cfg.data.source_domain))
     tgt = _slug(str(cfg.data.target_domain))
-    return root / "method" / ds / f"{src}_to_{tgt}"
+    return root / "ours" / ds / f"{src}_to_{tgt}"
 
 
 class OurMethod:
@@ -92,6 +93,7 @@ class OurMethod:
         self.w_change = float(getattr(mcfg, "w_change", 0.5))
         self.use_pseudo = bool(getattr(mcfg, "use_pseudo", False))
         self.pseudo_keep_ratio = float(getattr(mcfg, "pseudo_keep_ratio", 0.5))
+        self.round_epochs = int(getattr(self.cfg.method, "round_epochs", 1))
 
         self.prev_by_id: dict[str, torch.Tensor] = {}
         self.prior_ema: torch.Tensor | None = None
@@ -106,6 +108,14 @@ class OurMethod:
         ks = [base] * num_rounds
         ks[-1] += budget_total - sum(ks)
         return ks
+
+    def resolve_budget_total(self, budget_cfg: Any) -> int:
+        n_target = len(self.target_adapt_gt)
+        # ratio budget in (0, 1]: total_budget = |target_adapt| * ratio
+        if isinstance(budget_cfg, float) and 0.0 < budget_cfg <= 1.0:
+            return max(1, int(n_target * budget_cfg))
+        # integer-like absolute budget
+        return max(0, int(budget_cfg))
 
     def build_select_pool_loader(self, state: RoundState) -> DataLoader:
         return build_round_select_pool_loader(self.cfg, self.target_adapt_gt, state)
@@ -228,7 +238,8 @@ class OurMethod:
     ) -> tuple[str, RoundState, dict[str, Any]]:
         # A) load model M_{r-1}
         model = build_model(self.cfg).to(self.device)
-        load_checkpoint(ckpt_in, model, load_optimizer=False)
+        strict = False if round_idx == 0 else True
+        load_checkpoint(ckpt_in, model, load_optimizer=False, strict=strict)
 
         # B) selection pool from current state (exclude queried only)
         select_pool_loader = self.build_select_pool_loader(state_in)
@@ -242,7 +253,7 @@ class OurMethod:
         train_loaders = self.build_train_loaders(state_out)
 
         # E) finetune one round
-        apply_train_mode(self.cfg, model, mode=self.cfg.train.finetune_mode)
+        apply_finetune_mode(model, mode=self.cfg.train.finetune_mode)
         optimizer = build_optimizer(self.cfg, model)
         scheduler = build_scheduler(self.cfg, optimizer)
         trainer = TargetFinetuneTrainer(
@@ -251,44 +262,57 @@ class OurMethod:
             optimizer,
             scheduler,
             self.device,
-            self.num_classes,
             aux=aux,
         )
-        pseudo_loader = train_loaders.get("target_adapt_pseudo")
-        train_metrics = trainer.train_one_epoch(train_loaders["target_adapt_labeled"], pseudo_loader=pseudo_loader)
-
-        # F) static eval loaders
-        eval_metrics = trainer.evaluate(self.static_eval_loaders)
-
         round_dir = self.run_dir / f"round_{round_idx}"
         ckpt_dir = round_dir / "ckpt"
         ckpt_dir.mkdir(parents=True, exist_ok=True)
         ckpt_out = str(ckpt_dir / "ckpt_last.pt")
-        save_checkpoint(
-            ckpt_out,
-            model,
-            optimizer,
-            scheduler,
-            scaler=None,
-            step=0,
-            epoch=0,
-            extra={"round": round_idx, "ckpt_in": ckpt_in},
+        ckpt_best = str(ckpt_dir / "ckpt_best.pt")
+        summary = trainer.fit(
+            train_loaders=train_loaders,
+            eval_loaders=self.static_eval_loaders,
+            max_epochs=self.round_epochs,
+            ckpt_last_path=ckpt_out,
+            ckpt_best_path=ckpt_best,
+            monitor_loader="target_test",
+            monitor_metric="acc_top1",
+            ckpt_extra={"round": round_idx, "ckpt_in": ckpt_in},
+            train_log_path=str(round_dir / "train_log.jsonl"),
+            log_every_iters=int(getattr(self.cfg.train, "log_every_iters", 0)),
         )
+        eval_metrics = summary.eval_history[-1] if summary.eval_history else {}
 
         save_json(round_dir / "new_queried_ids.json", {"new_queried_ids": new_queried_ids})
         save_json(round_dir / "pseudo_store.json", {"pseudo_store": state_out.pseudo_store})
-        save_json(round_dir / "metrics.json", {"train": train_metrics, "eval": eval_metrics})
+        save_json(
+            round_dir / "metrics.json",
+            {
+                "eval_last": eval_metrics,
+                "eval_history": summary.eval_history,
+                "best_epoch": summary.best_epoch,
+                "best_score": summary.best_score,
+                "monitor_metric": "target_test.acc_top1",
+            },
+        )
         save_round_state(str(self.run_dir / "state_last.json"), state_out)
 
-        return ckpt_out, state_out, {"train": train_metrics, "eval": eval_metrics}
+        return ckpt_out, state_out, {"eval": eval_metrics}
 
     def run_all_rounds(self, ckpt_init: str, state_init: RoundState) -> tuple[str, RoundState]:
-        budget_total = int(getattr(self.cfg.method, "budget_total", state_init.budget_total))
+        budget_cfg = getattr(self.cfg.method, "budget_total", state_init.budget_total)
+        budget_total = self.resolve_budget_total(budget_cfg)
         rounds = int(self.cfg.method.num_rounds)
         k_list = self.compute_round_budgets(budget_total=budget_total, num_rounds=rounds)
 
         ckpt = ckpt_init
-        state = state_init
+        state = RoundState(
+            round_idx=state_init.round_idx,
+            queried_ids=set(state_init.queried_ids),
+            pseudo_store=dict(state_init.pseudo_store),
+            budget_total=budget_total,
+            budget_used=state_init.budget_used,
+        )
         for r in range(rounds):
             ckpt, state, _ = self.run_round(r, ckpt, state, k_list[r])
         return ckpt, state
