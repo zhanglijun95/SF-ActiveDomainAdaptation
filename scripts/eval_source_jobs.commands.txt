@@ -1,0 +1,12 @@
+# Smoke eval command
+CUDA_VISIBLE_DEVICES=0 /home/ljzhang/conda/envs/sfada/bin/python -m src.engine.eval_source --config /home/ljzhang/code/SFADA/configs/generated/source_train/smoke_office_home_art.yaml
+
+# Full eval jobs (run in parallel, one per GPU)
+CUDA_VISIBLE_DEVICES=0 /home/ljzhang/conda/envs/sfada/bin/python -m src.engine.eval_source --config /home/ljzhang/code/SFADA/configs/generated/source_train/office_home_art.yaml
+CUDA_VISIBLE_DEVICES=1 /home/ljzhang/conda/envs/sfada/bin/python -m src.engine.eval_source --config /home/ljzhang/code/SFADA/configs/generated/source_train/office_home_clipart.yaml
+CUDA_VISIBLE_DEVICES=2 /home/ljzhang/conda/envs/sfada/bin/python -m src.engine.eval_source --config /home/ljzhang/code/SFADA/configs/generated/source_train/office_home_product.yaml
+CUDA_VISIBLE_DEVICES=3 /home/ljzhang/conda/envs/sfada/bin/python -m src.engine.eval_source --config /home/ljzhang/code/SFADA/configs/generated/source_train/office_home_real_world.yaml
+CUDA_VISIBLE_DEVICES=4 /home/ljzhang/conda/envs/sfada/bin/python -m src.engine.eval_source --config /home/ljzhang/code/SFADA/configs/generated/source_train/office_31_amazon.yaml
+CUDA_VISIBLE_DEVICES=5 /home/ljzhang/conda/envs/sfada/bin/python -m src.engine.eval_source --config /home/ljzhang/code/SFADA/configs/generated/source_train/office_31_dslr.yaml
+CUDA_VISIBLE_DEVICES=6 /home/ljzhang/conda/envs/sfada/bin/python -m src.engine.eval_source --config /home/ljzhang/code/SFADA/configs/generated/source_train/office_31_webcam.yaml
+CUDA_VISIBLE_DEVICES=7 /home/ljzhang/conda/envs/sfada/bin/python -m src.engine.eval_source --config /home/ljzhang/code/SFADA/configs/generated/source_train/visda_c_train.yaml
