@@ -90,13 +90,18 @@ def apply_finetune_mode(model: nn.Module, mode: str) -> None:
             p.requires_grad = True
         return
 
-    if mode != "lora_finetune":
-        raise ValueError(f"Unsupported finetune mode: {mode}")
+    if mode == "backbone_only":
+        for name, p in model.named_parameters():
+            p.requires_grad = not name.startswith("classifier.")
+        return
 
-    for name, p in model.named_parameters():
-        trainable = (
-            "lora_" in name
-            or "bn" in name.lower()
-            or "batchnorm" in name.lower()
-        )
-        p.requires_grad = trainable
+    if mode == "lora_finetune":
+        for name, p in model.named_parameters():
+            trainable = (
+                "lora_" in name
+                or "bn" in name.lower()
+                or "batchnorm" in name.lower()
+            )
+            p.requires_grad = trainable
+    
+    raise ValueError(f"Unsupported finetune mode: {mode}")

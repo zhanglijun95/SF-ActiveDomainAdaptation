@@ -16,6 +16,7 @@ from .metrics import compute_classification_metrics
 
 @dataclass
 class TrainSummary:
+    train_history: list[dict[str, float]]
     eval_history: list[dict[str, Any]]
     best_epoch: int | None = None
     best_score: float | None = None
@@ -166,6 +167,7 @@ class SupervisedTrainer:
         train_log_path: str | None = None,
         log_every_iters: int | None = None,
     ) -> TrainSummary:
+        train_hist: list[dict[str, float]] = []
         eval_hist: list[dict[str, Any]] = []
         best_score = float("-inf")
         best_epoch: int | None = None
@@ -180,6 +182,7 @@ class SupervisedTrainer:
                 log_writer=log_f,
                 log_every=log_every_iters,
             )
+            train_hist.append(train_metrics)
             if log_f is not None:
                 log_f.write(json.dumps({"epoch": epoch_idx, **train_metrics}) + "\n")
 
@@ -199,6 +202,7 @@ class SupervisedTrainer:
         if log_f is not None:
             log_f.close()
         return TrainSummary(
+            train_history=train_hist,
             eval_history=eval_hist,
             best_epoch=best_epoch,
             best_score=None if best_epoch is None else best_score,

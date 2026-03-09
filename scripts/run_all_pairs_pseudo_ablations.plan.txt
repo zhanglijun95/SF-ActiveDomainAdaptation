@@ -1,0 +1,101 @@
+# Total jobs: 76
+# GPUs: 8
+# Planned waves: 10
+# Job formula: (office_31:6 + office_home:12 + visda_c:1) * 4 ablations = 76
+
+Wave 0
+  [slot gpu0] job_0: office_31__amazon__to__dslr__ab05_margin_change_pseudo_ce
+  [slot gpu1] job_1: office_31__amazon__to__dslr__ab06_margin_change_debias_pseudo_aml
+  [slot gpu2] job_2: office_31__amazon__to__dslr__ab07_margin_pseudo_ce
+  [slot gpu3] job_3: office_31__amazon__to__dslr__ab08_margin_debias_pseudo_aml
+  [slot gpu4] job_4: office_31__amazon__to__webcam__ab05_margin_change_pseudo_ce
+  [slot gpu5] job_5: office_31__amazon__to__webcam__ab06_margin_change_debias_pseudo_aml
+  [slot gpu6] job_6: office_31__amazon__to__webcam__ab07_margin_pseudo_ce
+  [slot gpu7] job_7: office_31__amazon__to__webcam__ab08_margin_debias_pseudo_aml
+
+Wave 1
+  [slot gpu0] job_8: office_31__dslr__to__amazon__ab05_margin_change_pseudo_ce
+  [slot gpu1] job_9: office_31__dslr__to__amazon__ab06_margin_change_debias_pseudo_aml
+  [slot gpu2] job_10: office_31__dslr__to__amazon__ab07_margin_pseudo_ce
+  [slot gpu3] job_11: office_31__dslr__to__amazon__ab08_margin_debias_pseudo_aml
+  [slot gpu4] job_12: office_31__dslr__to__webcam__ab05_margin_change_pseudo_ce
+  [slot gpu5] job_13: office_31__dslr__to__webcam__ab06_margin_change_debias_pseudo_aml
+  [slot gpu6] job_14: office_31__dslr__to__webcam__ab07_margin_pseudo_ce
+  [slot gpu7] job_15: office_31__dslr__to__webcam__ab08_margin_debias_pseudo_aml
+
+Wave 2
+  [slot gpu0] job_16: office_31__webcam__to__amazon__ab05_margin_change_pseudo_ce
+  [slot gpu1] job_17: office_31__webcam__to__amazon__ab06_margin_change_debias_pseudo_aml
+  [slot gpu2] job_18: office_31__webcam__to__amazon__ab07_margin_pseudo_ce
+  [slot gpu3] job_19: office_31__webcam__to__amazon__ab08_margin_debias_pseudo_aml
+  [slot gpu4] job_20: office_31__webcam__to__dslr__ab05_margin_change_pseudo_ce
+  [slot gpu5] job_21: office_31__webcam__to__dslr__ab06_margin_change_debias_pseudo_aml
+  [slot gpu6] job_22: office_31__webcam__to__dslr__ab07_margin_pseudo_ce
+  [slot gpu7] job_23: office_31__webcam__to__dslr__ab08_margin_debias_pseudo_aml
+
+Wave 3
+  [slot gpu0] job_24: office_home__art__to__clipart__ab05_margin_change_pseudo_ce
+  [slot gpu1] job_25: office_home__art__to__clipart__ab06_margin_change_debias_pseudo_aml
+  [slot gpu2] job_26: office_home__art__to__clipart__ab07_margin_pseudo_ce
+  [slot gpu3] job_27: office_home__art__to__clipart__ab08_margin_debias_pseudo_aml
+  [slot gpu4] job_28: office_home__art__to__product__ab05_margin_change_pseudo_ce
+  [slot gpu5] job_29: office_home__art__to__product__ab06_margin_change_debias_pseudo_aml
+  [slot gpu6] job_30: office_home__art__to__product__ab07_margin_pseudo_ce
+  [slot gpu7] job_31: office_home__art__to__product__ab08_margin_debias_pseudo_aml
+
+Wave 4
+  [slot gpu0] job_32: office_home__art__to__real_world__ab05_margin_change_pseudo_ce
+  [slot gpu1] job_33: office_home__art__to__real_world__ab06_margin_change_debias_pseudo_aml
+  [slot gpu2] job_34: office_home__art__to__real_world__ab07_margin_pseudo_ce
+  [slot gpu3] job_35: office_home__art__to__real_world__ab08_margin_debias_pseudo_aml
+  [slot gpu4] job_36: office_home__clipart__to__art__ab05_margin_change_pseudo_ce
+  [slot gpu5] job_37: office_home__clipart__to__art__ab06_margin_change_debias_pseudo_aml
+  [slot gpu6] job_38: office_home__clipart__to__art__ab07_margin_pseudo_ce
+  [slot gpu7] job_39: office_home__clipart__to__art__ab08_margin_debias_pseudo_aml
+
+Wave 5
+  [slot gpu0] job_40: office_home__clipart__to__product__ab05_margin_change_pseudo_ce
+  [slot gpu1] job_41: office_home__clipart__to__product__ab06_margin_change_debias_pseudo_aml
+  [slot gpu2] job_42: office_home__clipart__to__product__ab07_margin_pseudo_ce
+  [slot gpu3] job_43: office_home__clipart__to__product__ab08_margin_debias_pseudo_aml
+  [slot gpu4] job_44: office_home__clipart__to__real_world__ab05_margin_change_pseudo_ce
+  [slot gpu5] job_45: office_home__clipart__to__real_world__ab06_margin_change_debias_pseudo_aml
+  [slot gpu6] job_46: office_home__clipart__to__real_world__ab07_margin_pseudo_ce
+  [slot gpu7] job_47: office_home__clipart__to__real_world__ab08_margin_debias_pseudo_aml
+
+Wave 6
+  [slot gpu0] job_48: office_home__product__to__art__ab05_margin_change_pseudo_ce
+  [slot gpu1] job_49: office_home__product__to__art__ab06_margin_change_debias_pseudo_aml
+  [slot gpu2] job_50: office_home__product__to__art__ab07_margin_pseudo_ce
+  [slot gpu3] job_51: office_home__product__to__art__ab08_margin_debias_pseudo_aml
+  [slot gpu4] job_52: office_home__product__to__clipart__ab05_margin_change_pseudo_ce
+  [slot gpu5] job_53: office_home__product__to__clipart__ab06_margin_change_debias_pseudo_aml
+  [slot gpu6] job_54: office_home__product__to__clipart__ab07_margin_pseudo_ce
+  [slot gpu7] job_55: office_home__product__to__clipart__ab08_margin_debias_pseudo_aml
+
+Wave 7
+  [slot gpu0] job_56: office_home__product__to__real_world__ab05_margin_change_pseudo_ce
+  [slot gpu1] job_57: office_home__product__to__real_world__ab06_margin_change_debias_pseudo_aml
+  [slot gpu2] job_58: office_home__product__to__real_world__ab07_margin_pseudo_ce
+  [slot gpu3] job_59: office_home__product__to__real_world__ab08_margin_debias_pseudo_aml
+  [slot gpu4] job_60: office_home__real_world__to__art__ab05_margin_change_pseudo_ce
+  [slot gpu5] job_61: office_home__real_world__to__art__ab06_margin_change_debias_pseudo_aml
+  [slot gpu6] job_62: office_home__real_world__to__art__ab07_margin_pseudo_ce
+  [slot gpu7] job_63: office_home__real_world__to__art__ab08_margin_debias_pseudo_aml
+
+Wave 8
+  [slot gpu0] job_64: office_home__real_world__to__clipart__ab05_margin_change_pseudo_ce
+  [slot gpu1] job_65: office_home__real_world__to__clipart__ab06_margin_change_debias_pseudo_aml
+  [slot gpu2] job_66: office_home__real_world__to__clipart__ab07_margin_pseudo_ce
+  [slot gpu3] job_67: office_home__real_world__to__clipart__ab08_margin_debias_pseudo_aml
+  [slot gpu4] job_68: office_home__real_world__to__product__ab05_margin_change_pseudo_ce
+  [slot gpu5] job_69: office_home__real_world__to__product__ab06_margin_change_debias_pseudo_aml
+  [slot gpu6] job_70: office_home__real_world__to__product__ab07_margin_pseudo_ce
+  [slot gpu7] job_71: office_home__real_world__to__product__ab08_margin_debias_pseudo_aml
+
+Wave 9
+  [slot gpu0] job_72: visda_c__train__to__validation__ab05_margin_change_pseudo_ce
+  [slot gpu1] job_73: visda_c__train__to__validation__ab06_margin_change_debias_pseudo_aml
+  [slot gpu2] job_74: visda_c__train__to__validation__ab07_margin_pseudo_ce
+  [slot gpu3] job_75: visda_c__train__to__validation__ab08_margin_debias_pseudo_aml
+

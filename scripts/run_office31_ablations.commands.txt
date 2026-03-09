@@ -1,0 +1,11 @@
+# Smoke command (first ablation)
+CUDA_VISIBLE_DEVICES=0 /home/ljzhang/conda/envs/sfada/bin/python -m src.methods.run_rounds --config /home/ljzhang/code/SFADA/configs/ablations/office_31/00_random_pick.yaml
+
+# Full Office-31 ablation jobs
+CUDA_VISIBLE_DEVICES=0 /home/ljzhang/conda/envs/sfada/bin/python -m src.methods.run_rounds --config /home/ljzhang/code/SFADA/configs/ablations/office_31/00_random_pick.yaml
+CUDA_VISIBLE_DEVICES=1 /home/ljzhang/conda/envs/sfada/bin/python -m src.methods.run_rounds --config /home/ljzhang/code/SFADA/configs/ablations/office_31/01_margin_only.yaml
+CUDA_VISIBLE_DEVICES=2 /home/ljzhang/conda/envs/sfada/bin/python -m src.methods.run_rounds --config /home/ljzhang/code/SFADA/configs/ablations/office_31/02_change_only.yaml
+CUDA_VISIBLE_DEVICES=3 /home/ljzhang/conda/envs/sfada/bin/python -m src.methods.run_rounds --config /home/ljzhang/code/SFADA/configs/ablations/office_31/03_margin_change.yaml
+CUDA_VISIBLE_DEVICES=4 /home/ljzhang/conda/envs/sfada/bin/python -m src.methods.run_rounds --config /home/ljzhang/code/SFADA/configs/ablations/office_31/04_margin_change_debias.yaml
+CUDA_VISIBLE_DEVICES=5 /home/ljzhang/conda/envs/sfada/bin/python -m src.methods.run_rounds --config /home/ljzhang/code/SFADA/configs/ablations/office_31/05_margin_change_pseudo_ce.yaml
+CUDA_VISIBLE_DEVICES=6 /home/ljzhang/conda/envs/sfada/bin/python -m src.methods.run_rounds --config /home/ljzhang/code/SFADA/configs/ablations/office_31/06_margin_change_debias_pseudo_aml.yaml

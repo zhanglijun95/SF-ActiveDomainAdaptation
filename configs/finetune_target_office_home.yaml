@@ -48,7 +48,7 @@ train:
   num_workers: 4
   # If > 0, write per-iter loss every N steps to train_log.jsonl.
   log_every_iters: 50
-  lr: 0.001
+  lr: 0.0001
   weight_decay: 0.0005
   use_scheduler: false
   finetune_mode: lora_finetune
@@ -59,13 +59,18 @@ eval:
   monitor_source_val: true
 
 method:
+  # Optional experiment name for run directory naming.
+  # If empty, a tag is auto-built from method switches (random/margin/change/debias/pseudo/budget).
+  exp_name: ""
   # Number of active adaptation rounds.
   num_rounds: 10
   # Finetune epochs per round on (labeled + pseudo) loaders.
   round_epochs: 1
   # Total oracle labeling budget over all rounds.
   # int: absolute count, float in (0,1]: ratio of |target_adapt| (e.g., 0.1 -> 10%).
-  budget_total: 500
+  budget_total: 0.1
+  # If true, selection scores are random (ignores margin/change and disables pseudo branch).
+  random_pick: false
 
   # Query scoring: uncertainty (margin) + temporal change.
   score_use_margin: true
