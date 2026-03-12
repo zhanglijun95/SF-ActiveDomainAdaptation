@@ -40,6 +40,8 @@ emit_cfg() {
   local w_margin="${10}"
   local w_change="${11}"
   local use_debias="${12}"
+  local train_batch_size="${13:-64}"
+  local eval_batch_size="${14:-128}"
 
   cat > "$cfg_path" <<YAML
 seed: 42
@@ -87,7 +89,7 @@ model:
 
 train:
   epochs: 5
-  batch_size: 64
+  batch_size: ${train_batch_size}
   num_workers: 4
   log_every_iters: 20
   save_ckpt: false
@@ -97,7 +99,7 @@ train:
   finetune_mode: backbone_only
 
 eval:
-  batch_size: 128
+  batch_size: ${eval_batch_size}
   num_workers: 4
   monitor_source_val: true
 
@@ -194,7 +196,7 @@ build_all() {
   # visda_c: only train->validation (1 pair)
   for ab in "${AB_IDS[@]}"; do
     local cfg="$CFG_DIR/visda_c__train__to__validation__${ab}.yaml"
-    emit_cfg "$cfg" "visda_c" "/home/ljzhang/data/sfada/visda-c" "12" "resnet101" "train" "validation" "$ab" "$(ab_change_of "$ab")" "$(ab_w_margin_of "$ab")" "$(ab_w_change_of "$ab")" "$(ab_debias_of "$ab")"
+    emit_cfg "$cfg" "visda_c" "/home/ljzhang/data/sfada/visda-c" "12" "resnet101" "train" "validation" "$ab" "$(ab_change_of "$ab")" "$(ab_w_margin_of "$ab")" "$(ab_w_change_of "$ab")" "$(ab_debias_of "$ab")" "16" "32"
     cfgs+=("$cfg")
   done
 
@@ -241,19 +243,30 @@ build_all() {
 }
 
 run_waves() {
+  local start_wave="${1:-0}"
+  if ! [[ "$start_wave" =~ ^[0-9]+$ ]]; then
+    echo "start_wave must be a non-negative integer, got: $start_wave" >&2
+    exit 1
+  fi
   # Rebuild to ensure commands/plan match current script logic.
   build_all >/dev/null
 
   mapfile -t cmds < <(grep -E '^CUDA_VISIBLE_DEVICES=' "$COMMANDS_FILE")
   local total="${#cmds[@]}"
-  local idx=0
-  local wave=0
+  local wave_size=8
+  local idx=$(( start_wave * wave_size ))
+  local wave="$start_wave"
+
+  if [[ "$idx" -ge "$total" ]]; then
+    echo "start_wave=$start_wave is out of range (total jobs=$total, wave_size=$wave_size)." >&2
+    exit 1
+  fi
 
   while [[ $idx -lt $total ]]; do
-    echo "[wave ${wave}] launching jobs $idx..$(( idx + 7 < total ? idx + 7 : total - 1 ))"
+    echo "[wave ${wave}] launching jobs $idx..$(( idx + wave_size - 1 < total ? idx + wave_size - 1 : total - 1 ))"
     local -a pids=()
     local slot=0
-    while [[ $slot -lt 8 && $idx -lt $total ]]; do
+    while [[ $slot -lt $wave_size && $idx -lt $total ]]; do
       local cmd="${cmds[$idx]}"
       local log
       log="$LOG_DIR/job_${idx}.log"
@@ -275,12 +288,14 @@ run_waves() {
 
 print_usage() {
   cat <<USAGE
-Usage: $(basename "$0") [--list | --plan | --run-waves]
+Usage: $(basename "$0") [--list | --plan | --run-waves | --run-waves-from <wave_idx>]
 
 Modes:
   --list       Generate configs + commands and print command file
   --plan       Generate configs + print execution plan (waves on 8 GPUs)
   --run-waves  Run all jobs wave-by-wave (max 8 concurrent, no GPU conflict)
+  --run-waves-from <wave_idx>
+               Resume wave execution starting from the given wave index
 
 Artifacts:
   Configs : $CFG_DIR
@@ -303,7 +318,10 @@ case "$MODE" in
     cat "$PLAN_FILE"
     ;;
   --run-waves)
-    run_waves
+    run_waves 0
+    ;;
+  --run-waves-from)
+    run_waves "${2:-}"
     ;;
   *)
     print_usage

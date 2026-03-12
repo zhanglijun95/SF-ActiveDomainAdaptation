@@ -4,7 +4,26 @@ from __future__ import annotations
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 from torchvision.models import resnet101, resnet50
+
+
+class SafeBatchNorm1d(nn.BatchNorm1d):
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        # BatchNorm1d cannot compute batch statistics with batch size 1 in training.
+        # Fall back to running statistics for that edge case.
+        if self.training and input.dim() >= 2 and input.size(0) == 1:
+            return F.batch_norm(
+                input,
+                self.running_mean,
+                self.running_var,
+                self.weight,
+                self.bias,
+                False,
+                self.momentum,
+                self.eps,
+            )
+        return super().forward(input)
 
 
 class ResNetBottleneckClassifier(nn.Module):
@@ -36,7 +55,7 @@ class ResNetBottleneckClassifier(nn.Module):
         self.layer4 = backbone.layer4
         self.avgpool = backbone.avgpool
 
-        layers = [nn.Linear(2048, bottleneck_dim), nn.BatchNorm1d(bottleneck_dim)]
+        layers = [nn.Linear(2048, bottleneck_dim), SafeBatchNorm1d(bottleneck_dim)]
         if use_relu:
             layers.append(nn.ReLU(inplace=True))
         self.bottleneck = nn.Sequential(*layers)

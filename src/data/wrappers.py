@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from PIL import Image
 from torch.utils.data import Dataset
 
 
@@ -14,8 +15,8 @@ class LabelRouterDataset(Dataset):
         self,
         base_ds: Dataset,
         queried_ids: set[Any],
-        pseudo_store: dict[Any, int] | None = None,
-        unlabeled_label: int = -1,
+        pseudo_store: dict[Any, Any] | None = None,
+        unlabeled_label: Any = -1,
     ) -> None:
         self.base_ds = base_ds
         self.queried_ids = queried_ids
@@ -25,15 +26,21 @@ class LabelRouterDataset(Dataset):
     def __len__(self) -> int:
         return len(self.base_ds)
 
+    def get_sample_id(self, index: int) -> Any:
+        if hasattr(self.base_ds, "get_sample_id"):
+            return self.base_ds.get_sample_id(index)
+        return self.base_ds[index]["sample_id"]
+
     def __getitem__(self, index: int) -> dict[str, Any]:
         item = dict(self.base_ds[index])
         sid = item["sample_id"]
         if sid in self.queried_ids:
             return item
+        label_key = "label" if "label" in item else "annotations"
         if sid in self.pseudo_store:
-            item["label"] = int(self.pseudo_store[sid])
+            item[label_key] = self.pseudo_store[sid]
             return item
-        item["label"] = self.unlabeled_label
+        item[label_key] = self.unlabeled_label
         return item
 
 
@@ -65,7 +72,7 @@ class IdFilteredDataset(Dataset):
     def _build_indices(self) -> list[int]:
         indices: list[int] = []
         for i in range(len(self.routed_ds)):
-            sid = self.routed_ds[i]["sample_id"]
+            sid = self.routed_ds.get_sample_id(i)
             if self._keep(sid):
                 indices.append(i)
         return indices
@@ -90,10 +97,11 @@ class TwoViewDataset(Dataset):
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         item = self.base_ds[index]
-        image = item["image"]
+        image = item["image"] if "image" in item else Image.open(item["file_name"]).convert("RGB")
+        label_key = "label" if "label" in item else "annotations"
         return {
             "x_w": self.weak_tf(image),
             "x_s": self.strong_tf(image),
-            "label": item["label"],
+             label_key: item[label_key],
             "sample_id": item["sample_id"],
         }
