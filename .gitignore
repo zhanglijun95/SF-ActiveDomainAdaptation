@@ -5,6 +5,7 @@ __pycache__/
 doc/
 runs/
 configs/
+external/
 
 # C extensions
 *.so
