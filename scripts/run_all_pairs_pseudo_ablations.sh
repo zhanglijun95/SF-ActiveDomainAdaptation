@@ -42,6 +42,9 @@ emit_cfg() {
   local use_debias="${12}"
   local train_batch_size="${13:-64}"
   local eval_batch_size="${14:-128}"
+  local random_pick="${15:-false}"
+  local score_use_margin="${16:-true}"
+  local use_pseudo="${17:-true}"
 
   cat > "$cfg_path" <<YAML
 seed: 42
@@ -108,15 +111,15 @@ method:
   num_rounds: 10
   round_epochs: 20
   budget_total: 0.05
-  random_pick: false
-  score_use_margin: true
+  random_pick: ${random_pick}
+  score_use_margin: ${score_use_margin}
   score_use_change: ${score_use_change}
   w_margin: ${w_margin}
   w_change: ${w_change}
   use_debias: ${use_debias}
   debias_lambda: 1.0
   prior_momentum: 0.9
-  use_pseudo: true
+  use_pseudo: ${use_pseudo}
   pseudo_keep_ratio: 0.5
   pseudo_loss_weight: 1.0
   aml_lambda: 1.0
@@ -124,15 +127,29 @@ YAML
 }
 
 AB_IDS=(
+  "ab00_random_pick"
   "ab05_margin_change_pseudo_ce"
   "ab06_margin_change_debias_pseudo_aml"
   "ab07_margin_pseudo_ce"
   "ab08_margin_debias_pseudo_aml"
 )
 
-# For AML-vs-CE behavior, use_debias controls whether prior/AML branch is active.
+# Ablation settings.
+ab_random_of() {
+  case "$1" in
+    ab00_random_pick) echo "true" ;;
+    *) echo "false" ;;
+  esac
+}
+ab_margin_of() {
+  case "$1" in
+    ab00_random_pick) echo "false" ;;
+    *) echo "true" ;;
+  esac
+}
 ab_change_of() {
   case "$1" in
+    ab00_random_pick) echo "false" ;;
     ab05_margin_change_pseudo_ce) echo "true" ;;
     ab06_margin_change_debias_pseudo_aml) echo "true" ;;
     ab07_margin_pseudo_ce) echo "false" ;;
@@ -142,6 +159,7 @@ ab_change_of() {
 }
 ab_w_margin_of() {
   case "$1" in
+    ab00_random_pick) echo "0.5" ;;
     ab05_margin_change_pseudo_ce|ab06_margin_change_debias_pseudo_aml) echo "0.5" ;;
     ab07_margin_pseudo_ce|ab08_margin_debias_pseudo_aml) echo "1.0" ;;
     *) echo "1.0" ;;
@@ -149,6 +167,7 @@ ab_w_margin_of() {
 }
 ab_w_change_of() {
   case "$1" in
+    ab00_random_pick) echo "0.5" ;;
     ab05_margin_change_pseudo_ce|ab06_margin_change_debias_pseudo_aml) echo "0.5" ;;
     ab07_margin_pseudo_ce|ab08_margin_debias_pseudo_aml) echo "0.0" ;;
     *) echo "0.0" ;;
@@ -158,6 +177,12 @@ ab_debias_of() {
   case "$1" in
     ab06_margin_change_debias_pseudo_aml|ab08_margin_debias_pseudo_aml) echo "true" ;;
     *) echo "false" ;;
+  esac
+}
+ab_pseudo_of() {
+  case "$1" in
+    ab00_random_pick) echo "false" ;;
+    *) echo "true" ;;
   esac
 }
 
@@ -174,7 +199,7 @@ build_all() {
       [[ "$s" == "$t" ]] && continue
       for ab in "${AB_IDS[@]}"; do
         local cfg="$CFG_DIR/office_31__$(slug "$s")__to__$(slug "$t")__${ab}.yaml"
-        emit_cfg "$cfg" "office_31" "/home/ljzhang/data/sfada/office-31" "31" "resnet50" "$s" "$t" "$ab" "$(ab_change_of "$ab")" "$(ab_w_margin_of "$ab")" "$(ab_w_change_of "$ab")" "$(ab_debias_of "$ab")"
+        emit_cfg "$cfg" "office_31" "/home/ljzhang/data/sfada/office-31" "31" "resnet50" "$s" "$t" "$ab" "$(ab_change_of "$ab")" "$(ab_w_margin_of "$ab")" "$(ab_w_change_of "$ab")" "$(ab_debias_of "$ab")" "64" "128" "$(ab_random_of "$ab")" "$(ab_margin_of "$ab")" "$(ab_pseudo_of "$ab")"
         cfgs+=("$cfg")
       done
     done
@@ -187,7 +212,7 @@ build_all() {
       [[ "$s" == "$t" ]] && continue
       for ab in "${AB_IDS[@]}"; do
         local cfg="$CFG_DIR/office_home__$(slug "$s")__to__$(slug "$t")__${ab}.yaml"
-        emit_cfg "$cfg" "office_home" "/home/ljzhang/data/sfada/office-home" "65" "resnet50" "$s" "$t" "$ab" "$(ab_change_of "$ab")" "$(ab_w_margin_of "$ab")" "$(ab_w_change_of "$ab")" "$(ab_debias_of "$ab")"
+        emit_cfg "$cfg" "office_home" "/home/ljzhang/data/sfada/office-home" "65" "resnet50" "$s" "$t" "$ab" "$(ab_change_of "$ab")" "$(ab_w_margin_of "$ab")" "$(ab_w_change_of "$ab")" "$(ab_debias_of "$ab")" "64" "128" "$(ab_random_of "$ab")" "$(ab_margin_of "$ab")" "$(ab_pseudo_of "$ab")"
         cfgs+=("$cfg")
       done
     done
@@ -196,7 +221,7 @@ build_all() {
   # visda_c: only train->validation (1 pair)
   for ab in "${AB_IDS[@]}"; do
     local cfg="$CFG_DIR/visda_c__train__to__validation__${ab}.yaml"
-    emit_cfg "$cfg" "visda_c" "/home/ljzhang/data/sfada/visda-c" "12" "resnet101" "train" "validation" "$ab" "$(ab_change_of "$ab")" "$(ab_w_margin_of "$ab")" "$(ab_w_change_of "$ab")" "$(ab_debias_of "$ab")" "16" "32"
+    emit_cfg "$cfg" "visda_c" "/home/ljzhang/data/sfada/visda-c" "12" "resnet101" "train" "validation" "$ab" "$(ab_change_of "$ab")" "$(ab_w_margin_of "$ab")" "$(ab_w_change_of "$ab")" "$(ab_debias_of "$ab")" "16" "32" "$(ab_random_of "$ab")" "$(ab_margin_of "$ab")" "$(ab_pseudo_of "$ab")"
     cfgs+=("$cfg")
   done
 
@@ -207,13 +232,13 @@ build_all() {
     echo "# Total jobs: $total"
     echo "# GPUs: 8"
     echo "# Planned waves: $waves"
-    echo "# Job formula: (office_31:6 + office_home:12 + visda_c:1) * 4 ablations = 76"
+    echo "# Job formula: (office_31:6 + office_home:12 + visda_c:1) * 5 ablations = 95"
     echo
   } > "$PLAN_FILE"
 
   {
-    echo "# Full commands for all datasets/domain pairs and 4 pseudo ablations"
-    echo "# ABLATIONS: ab05_margin_change_pseudo_ce, ab06_margin_change_debias_pseudo_aml, ab07_margin_pseudo_ce, ab08_margin_debias_pseudo_aml"
+    echo "# Full commands for all datasets/domain pairs and 5 ablations"
+    echo "# ABLATIONS: ab00_random_pick, ab05_margin_change_pseudo_ce, ab06_margin_change_debias_pseudo_aml, ab07_margin_pseudo_ce, ab08_margin_debias_pseudo_aml"
     echo
   } > "$COMMANDS_FILE"
 
@@ -286,9 +311,46 @@ run_waves() {
   echo "All jobs finished. Logs: $LOG_DIR"
 }
 
+run_random_only() {
+  build_all >/dev/null
+
+  mapfile -t cmds < <(grep -E '^CUDA_VISIBLE_DEVICES=.*ab00_random_pick' "$COMMANDS_FILE")
+  local total="${#cmds[@]}"
+  local wave_size=8
+  local idx=0
+  local wave=0
+
+  if [[ "$total" -eq 0 ]]; then
+    echo "No random baseline jobs found in $COMMANDS_FILE" >&2
+    exit 1
+  fi
+
+  while [[ $idx -lt $total ]]; do
+    echo "[random wave ${wave}] launching jobs $idx..$(( idx + wave_size - 1 < total ? idx + wave_size - 1 : total - 1 ))"
+    local -a pids=()
+    local slot=0
+    while [[ $slot -lt $wave_size && $idx -lt $total ]]; do
+      local cmd="${cmds[$idx]}"
+      local log="$LOG_DIR/random_only_job_${idx}.log"
+      echo "  [random job $idx][gpu $slot] $cmd"
+      nohup bash -lc "$cmd" > "$log" 2>&1 &
+      pids+=("$!")
+      idx=$((idx + 1))
+      slot=$((slot + 1))
+    done
+    for p in "${pids[@]}"; do
+      wait "$p"
+    done
+    echo "[random wave ${wave}] completed"
+    wave=$((wave + 1))
+  done
+
+  echo "Random-only jobs finished. Logs: $LOG_DIR"
+}
+
 print_usage() {
   cat <<USAGE
-Usage: $(basename "$0") [--list | --plan | --run-waves | --run-waves-from <wave_idx>]
+Usage: $(basename "$0") [--list | --plan | --run-waves | --run-waves-from <wave_idx> | --run-random-only]
 
 Modes:
   --list       Generate configs + commands and print command file
@@ -296,6 +358,8 @@ Modes:
   --run-waves  Run all jobs wave-by-wave (max 8 concurrent, no GPU conflict)
   --run-waves-from <wave_idx>
                Resume wave execution starting from the given wave index
+  --run-random-only
+               Run only ab00_random_pick jobs in 8-GPU waves
 
 Artifacts:
   Configs : $CFG_DIR
@@ -322,6 +386,9 @@ case "$MODE" in
     ;;
   --run-waves-from)
     run_waves "${2:-}"
+    ;;
+  --run-random-only)
+    run_random_only
     ;;
   *)
     print_usage

@@ -45,7 +45,7 @@ def _annotation_root(root: Path) -> Path:
 
 
 def _image_root(root: Path, foggy: bool) -> Path:
-    return root / ("leftImg8bit_transmittance" if foggy else "leftImg8bit")
+    return root / ("leftImg8bit_foggy" if foggy else "leftImg8bit")
 
 
 def _load_annotation(annotation_path: Path) -> dict[str, Any]:
@@ -155,7 +155,7 @@ class DAODCityscapesDataset(Dataset):
                 return image_name[: -len(suffix)]
             return None
 
-        suffix = f"_leftImg8bit_transmittance_beta_{self.foggy_beta}.png"
+        suffix = f"_leftImg8bit_foggy_beta_{self.foggy_beta}.png"
         if image_name.endswith(suffix):
             return image_name[: -len(suffix)]
         return None
@@ -177,6 +177,7 @@ class DAODCityscapesDataset(Dataset):
             "width": width,
             "annotations": annotations,
         }
+
 
 def build_dataset(
     cfg: Any,

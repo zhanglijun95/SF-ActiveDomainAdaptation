@@ -24,6 +24,22 @@ def resolve_source_run_dir(cfg: Any) -> Path:
     return root / "source" / dataset / source
 
 
+def resolve_daod_source_run_dir(cfg: Any) -> Path:
+    root = Path(getattr(cfg.run, "root_dir", "runs"))
+    source = _slug(str(cfg.data.source_domain))
+    target = _slug(str(cfg.data.target_domain))
+    model_name = _slug(str(cfg.detector.model_name))
+    return root / "daod_source" / f"{source}__to__{target}" / model_name
+
+
+def resolve_daod_oracle_run_dir(cfg: Any) -> Path:
+    root = Path(getattr(cfg.run, "root_dir", "runs"))
+    source = _slug(str(cfg.data.source_domain))
+    target = _slug(str(cfg.data.target_domain))
+    model_name = _slug(str(cfg.detector.model_name))
+    return root / "daod_oracle" / f"{source}__to__{target}" / model_name
+
+
 def resolve_source_ckpt_path(cfg: Any, which: str = "best") -> Path:
     ckpt_dir = resolve_source_run_dir(cfg) / "ckpt"
     key = str(which).strip().lower()

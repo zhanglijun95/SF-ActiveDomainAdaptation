@@ -1,0 +1,6 @@
+# One-wave VisDA-C ablations
+CUDA_VISIBLE_DEVICES=0 /home/ljzhang/conda/envs/sfada/bin/python -m src.methods.run_rounds --config /home/ljzhang/code/SFADA/configs/generated/pseudo_ablations_all_pairs/visda_c__train__to__validation__ab00_random_pick.yaml
+CUDA_VISIBLE_DEVICES=1 /home/ljzhang/conda/envs/sfada/bin/python -m src.methods.run_rounds --config /home/ljzhang/code/SFADA/configs/generated/pseudo_ablations_all_pairs/visda_c__train__to__validation__ab05_margin_change_pseudo_ce.yaml
+CUDA_VISIBLE_DEVICES=2 /home/ljzhang/conda/envs/sfada/bin/python -m src.methods.run_rounds --config /home/ljzhang/code/SFADA/configs/generated/pseudo_ablations_all_pairs/visda_c__train__to__validation__ab06_margin_change_debias_pseudo_aml.yaml
+CUDA_VISIBLE_DEVICES=3 /home/ljzhang/conda/envs/sfada/bin/python -m src.methods.run_rounds --config /home/ljzhang/code/SFADA/configs/generated/pseudo_ablations_all_pairs/visda_c__train__to__validation__ab07_margin_pseudo_ce.yaml
+CUDA_VISIBLE_DEVICES=4 /home/ljzhang/conda/envs/sfada/bin/python -m src.methods.run_rounds --config /home/ljzhang/code/SFADA/configs/generated/pseudo_ablations_all_pairs/visda_c__train__to__validation__ab08_margin_debias_pseudo_aml.yaml
