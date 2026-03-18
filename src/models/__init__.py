@@ -8,6 +8,7 @@ from .detrex_adapter import (
     build_daod_model,
     load_daod_model_config,
     run_daod_inference,
+    run_daod_inference_with_raw,
 )
 
 __all__ = [
@@ -19,4 +20,5 @@ __all__ = [
     "load_daod_model_config",
     "build_daod_model",
     "run_daod_inference",
+    "run_daod_inference_with_raw",
 ]

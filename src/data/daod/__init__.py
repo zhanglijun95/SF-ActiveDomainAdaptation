@@ -7,6 +7,9 @@ from .cityscapes_to_foggy_cityscapes import (
     build_dataset as build_cityscapes_to_foggy_cityscapes_dataset,
 )
 from .analysis import (
+    classify_detection_errors,
+    compute_decoder_proxy_summary,
+    compute_logit_proxy_summary,
     compute_proxy_summary,
     greedy_match_rows,
     instances_to_prediction_rows,
@@ -38,8 +41,11 @@ __all__ = [
     "xyxy_iou",
     "greedy_match_rows",
     "match_predictions_to_gt",
+    "classify_detection_errors",
     "instances_to_prediction_rows",
     "compute_proxy_summary",
+    "compute_logit_proxy_summary",
+    "compute_decoder_proxy_summary",
     "zscore",
     "build_daod_dataset",
     "get_daod_thing_classes",

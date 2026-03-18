@@ -203,6 +203,225 @@ def match_predictions_to_gt(
     return tp_rows, fp_rows, fn_rows
 
 
+def classify_detection_errors(
+    gt_annotations: list[dict[str, Any]],
+    pred_rows: list[dict[str, Any]],
+    *,
+    match_iou_thresh: float,
+    nearby_iou_thresh: float,
+) -> dict[str, Any]:
+    """Split GT/prediction errors into more interpretable detection modes.
+
+    Inputs:
+    - `gt_annotations`: GT annotation dicts with `bbox` and `category_id`
+    - `pred_rows`: prediction dicts with `bbox`, `score`, and `category_id`
+    - `match_iou_thresh`: IoU threshold for a correct GT/prediction match
+    - `nearby_iou_thresh`: lower IoU threshold used to define a nearby object
+
+    Output:
+    - a dict containing typed GT and FP error counts plus a continuous
+      localization error summary
+
+    Error modes:
+    - `miss_count`: GT object has no nearby prediction at all
+    - `wrong_class_count`: GT object has a nearby prediction, but not with the
+      correct class
+    - `localization_error_count`: GT object has a nearby same-class prediction
+      that does not reach the correct-match IoU threshold
+    - `background_fp_count`: unmatched prediction is not near any GT object
+    - `duplicate_fp_count`: unmatched prediction is near a same-class GT object,
+      so it is more plausibly a duplicate / extra detection
+    - `localization_error_mean`: mean `(1 - IoU)` over localization-error GTs
+
+    Assumptions:
+    - this function keeps the aspects separate instead of collapsing them into
+      one scalar difficulty target
+    """
+
+    gt_rows = [
+        {
+            "bbox": [float(v) for v in ann["bbox"]],
+            "category_id": int(ann["category_id"]),
+        }
+        for ann in gt_annotations
+    ]
+    _, unmatched_gt_indices, unmatched_pred_indices = greedy_match_rows(
+        gt_rows,
+        pred_rows,
+        iou_thresh=match_iou_thresh,
+        class_aware=True,
+    )
+
+    miss_count = 0
+    wrong_class_count = 0
+    localization_error_count = 0
+    localization_error_values: list[float] = []
+    for gt_index in unmatched_gt_indices:
+        gt_row = gt_rows[gt_index]
+        nearby_iou = 0.0
+        same_class_nearby_iou = 0.0
+        for pred_row in pred_rows:
+            iou = xyxy_iou(gt_row["bbox"], pred_row["bbox"])
+            nearby_iou = max(nearby_iou, iou)
+            if pred_row["category_id"] == gt_row["category_id"]:
+                same_class_nearby_iou = max(same_class_nearby_iou, iou)
+
+        if same_class_nearby_iou >= nearby_iou_thresh:
+            localization_error_count += 1
+            localization_error_values.append(1.0 - same_class_nearby_iou)
+        elif nearby_iou >= nearby_iou_thresh:
+            wrong_class_count += 1
+        else:
+            miss_count += 1
+
+    background_fp_count = 0
+    duplicate_fp_count = 0
+    for pred_index in unmatched_pred_indices:
+        pred_row = pred_rows[pred_index]
+        max_iou_any_gt = 0.0
+        max_iou_same_class_gt = 0.0
+        for gt_row in gt_rows:
+            iou = xyxy_iou(pred_row["bbox"], gt_row["bbox"])
+            max_iou_any_gt = max(max_iou_any_gt, iou)
+            if pred_row["category_id"] == gt_row["category_id"]:
+                max_iou_same_class_gt = max(max_iou_same_class_gt, iou)
+        if max_iou_any_gt < nearby_iou_thresh:
+            background_fp_count += 1
+        elif max_iou_same_class_gt >= nearby_iou_thresh:
+            duplicate_fp_count += 1
+        else:
+            background_fp_count += 1
+
+    return {
+        "miss_count": float(miss_count),
+        "wrong_class_count": float(wrong_class_count),
+        "localization_error_count": float(localization_error_count),
+        "localization_error_mean": float(np.mean(localization_error_values)) if localization_error_values else 0.0,
+        "localization_error_sum": float(np.sum(localization_error_values)) if localization_error_values else 0.0,
+        "background_fp_count": float(background_fp_count),
+        "duplicate_fp_count": float(duplicate_fp_count),
+    }
+
+
+def _softmax(x: np.ndarray) -> np.ndarray:
+    x = x - np.max(x)
+    exp_x = np.exp(x)
+    denom = np.sum(exp_x)
+    return exp_x / denom if denom > 0 else np.zeros_like(x)
+
+
+def compute_logit_proxy_summary(selected_detections: list[dict[str, Any]]) -> dict[str, float]:
+    """Compute image-level classification uncertainty proxies from detection logits.
+
+    Inputs:
+    - `selected_detections`: per-detection rows from the adapter raw-output path
+      containing `class_logits` and `selected_logit`
+
+    Output:
+    - a flat dict of image-level logit uncertainty summaries
+
+    Score meanings:
+    - entropy proxies: larger means more class ambiguity per selected detection
+    - margin proxies: smaller top-1 vs top-2 separation means more ambiguity
+    - selected-logit proxies: lower selected logits mean weaker class evidence
+    """
+
+    if not selected_detections:
+        return {
+            "proxy_logit_entropy_mean": 0.0,
+            "proxy_logit_entropy_high_frac": 0.0,
+            "proxy_logit_margin_mean": 0.0,
+            "proxy_logit_low_margin_frac": 0.0,
+            "proxy_selected_logit_mean": 0.0,
+        }
+
+    entropies = []
+    margins = []
+    selected_logits = []
+    for det in selected_detections:
+        logits = det["class_logits"].detach().cpu().numpy().astype(float)
+        probs = _softmax(logits)
+        probs = np.clip(probs, 1e-12, 1.0)
+        entropies.append(float(-(probs * np.log(probs)).sum() / np.log(len(probs))))
+        top2 = np.sort(probs)[-2:]
+        margins.append(float(top2[-1] - top2[-2]))
+        selected_logits.append(float(det["selected_logit"]))
+
+    entropies_np = np.asarray(entropies)
+    margins_np = np.asarray(margins)
+    selected_logits_np = np.asarray(selected_logits)
+    return {
+        "proxy_logit_entropy_mean": float(entropies_np.mean()),
+        "proxy_logit_entropy_high_frac": float((entropies_np > 0.5).mean()),
+        "proxy_logit_margin_mean": float(margins_np.mean()),
+        "proxy_logit_low_margin_frac": float((margins_np < 0.2).mean()),
+        "proxy_selected_logit_mean": float(selected_logits_np.mean()),
+    }
+
+
+def compute_decoder_proxy_summary(selected_detections: list[dict[str, Any]]) -> dict[str, float]:
+    """Compute image-level decoder instability proxies from DINO aux outputs.
+
+    Inputs:
+    - `selected_detections`: per-detection rows from the adapter raw-output path
+      containing `aux_selected_logits`, `aux_class_logits`, and `aux_bbox_xyxy`
+
+    Output:
+    - a flat dict of image-level decoder-instability summaries
+
+    Score meanings:
+    - class-instability proxies: how much selected-query logits or top classes
+      change across decoder layers
+    - box-instability proxies: how much selected-query boxes drift across
+      decoder layers in original image coordinates
+    """
+
+    detections_with_aux = [det for det in selected_detections if "aux_selected_logits" in det]
+    if not detections_with_aux:
+        return {
+            "proxy_decoder_logit_std_mean": 0.0,
+            "proxy_decoder_top_class_flip_frac": 0.0,
+            "proxy_decoder_box_iou_gap_mean": 0.0,
+            "proxy_decoder_box_center_shift_mean": 0.0,
+        }
+
+    logit_stds = []
+    class_flip_flags = []
+    box_iou_gaps = []
+    center_shifts = []
+    for det in detections_with_aux:
+        aux_selected_logits = np.asarray(det["aux_selected_logits"], dtype=float)
+        logit_stds.append(float(aux_selected_logits.std()))
+
+        aux_top_classes = []
+        for aux_logits in det["aux_class_logits"]:
+            aux_logits_np = aux_logits.detach().cpu().numpy()
+            aux_top_classes.append(int(np.argmax(aux_logits_np)))
+        class_flip_flags.append(float(len(set(aux_top_classes)) > 1))
+
+        final_box = det["bbox_xyxy"].detach().cpu().numpy().astype(float).tolist()
+        aux_boxes = [aux_box.detach().cpu().numpy().astype(float).tolist() for aux_box in det["aux_bbox_xyxy"]]
+        aux_ious = [xyxy_iou(aux_box, final_box) for aux_box in aux_boxes]
+        box_iou_gaps.append(float(np.mean([1.0 - iou for iou in aux_ious])))
+
+        fx0, fy0, fx1, fy1 = final_box
+        final_center = np.asarray([(fx0 + fx1) / 2.0, (fy0 + fy1) / 2.0], dtype=float)
+        diag = max(np.hypot(fx1 - fx0, fy1 - fy0), 1e-6)
+        shifts = []
+        for aux_box in aux_boxes:
+            ax0, ay0, ax1, ay1 = aux_box
+            aux_center = np.asarray([(ax0 + ax1) / 2.0, (ay0 + ay1) / 2.0], dtype=float)
+            shifts.append(float(np.linalg.norm(aux_center - final_center) / diag))
+        center_shifts.append(float(np.mean(shifts)))
+
+    return {
+        "proxy_decoder_logit_std_mean": float(np.mean(logit_stds)),
+        "proxy_decoder_top_class_flip_frac": float(np.mean(class_flip_flags)),
+        "proxy_decoder_box_iou_gap_mean": float(np.mean(box_iou_gaps)),
+        "proxy_decoder_box_center_shift_mean": float(np.mean(center_shifts)),
+    }
+
+
 def compute_proxy_summary(
     original_rows: list[dict[str, Any]],
     weak_rows: list[dict[str, Any]],
@@ -247,6 +466,15 @@ def compute_proxy_summary(
         [abs(match["left"]["score"] - match["right"]["score"]) for match in matches],
         dtype=float,
     )
+    matched_center_shifts = []
+    for match in matches:
+        lx0, ly0, lx1, ly1 = match["left"]["bbox"]
+        rx0, ry0, rx1, ry1 = match["right"]["bbox"]
+        left_center = np.asarray([(lx0 + lx1) / 2.0, (ly0 + ly1) / 2.0], dtype=float)
+        right_center = np.asarray([(rx0 + rx1) / 2.0, (ry0 + ry1) / 2.0], dtype=float)
+        diag = max(np.hypot(lx1 - lx0, ly1 - ly0), 1e-6)
+        matched_center_shifts.append(float(np.linalg.norm(left_center - right_center) / diag))
+    matched_center_shifts = np.asarray(matched_center_shifts, dtype=float)
     class_disagree_count = sum(
         int(match["left"]["category_id"] != match["right"]["category_id"])
         for match in matches
@@ -269,6 +497,7 @@ def compute_proxy_summary(
         "proxy_ws_unmatched_frac": float((len(unmatched_weak) + len(unmatched_strong)) / max(1.0, len(weak_rows) + len(strong_rows))),
         "proxy_ws_mean_iou": float(matched_ious.mean()) if len(matched_ious) else 0.0,
         "proxy_ws_iou_gap": float(1.0 - matched_ious.mean()) if len(matched_ious) else 1.0,
+        "proxy_ws_center_shift_mean": float(matched_center_shifts.mean()) if len(matched_center_shifts) else 0.0,
         "proxy_ws_mean_score_diff": float(matched_score_diffs.mean()) if len(matched_score_diffs) else 0.0,
         "proxy_ws_class_disagree_count": float(class_disagree_count),
         "proxy_ws_class_disagree_frac": float(class_disagree_count / match_count) if match_count else 0.0,

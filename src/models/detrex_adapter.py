@@ -12,6 +12,8 @@ import numpy as np
 from PIL import Image
 import torch
 from detectron2.config import LazyConfig, instantiate
+from detrex.layers import box_cxcywh_to_xyxy
+from detrex.utils import inverse_sigmoid
 
 
 _MODEL_ZOO_URL = "https://detrex.readthedocs.io/en/latest/tutorials/Model_Zoo.html"
@@ -227,6 +229,147 @@ def _prepare_input(adapter: DetrexAdapter, sample: dict[str, Any]) -> dict[str, 
     }
 
 
+def _run_dino_raw_outputs(adapter: DetrexAdapter, inputs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Run the local detrex DINO model and keep raw decoder outputs.
+
+    Inputs:
+    - `inputs`: detectron2-style model inputs from `_prepare_input`
+
+    Output:
+    - one raw output dict per input image containing:
+      `pred_logits`, `pred_boxes`, optional `aux_outputs`, and `enc_outputs`
+
+    Assumptions:
+    - this helper is intentionally DINO-specific
+    - it mirrors the evaluation path inside detrex DINO before postprocessing
+    """
+
+    model = adapter.model
+    if not all(hasattr(model, attr) for attr in ("preprocess_image", "backbone", "neck", "transformer")):
+        raise TypeError("Raw-output extraction is only implemented for the local DINO-style detrex model path.")
+
+    images = model.preprocess_image(inputs)
+    batch_size, _, H, W = images.tensor.shape
+    img_masks = images.tensor.new_zeros(batch_size, H, W)
+
+    features = model.backbone(images.tensor)
+    multi_level_feats = model.neck(features)
+    multi_level_masks = []
+    multi_level_position_embeddings = []
+    for feat in multi_level_feats:
+        multi_level_masks.append(
+            torch.nn.functional.interpolate(img_masks[None], size=feat.shape[-2:]).to(torch.bool).squeeze(0)
+        )
+        multi_level_position_embeddings.append(model.position_embedding(multi_level_masks[-1]))
+
+    inter_states, init_reference, inter_references, enc_state, enc_reference = model.transformer(
+        multi_level_feats,
+        multi_level_masks,
+        multi_level_position_embeddings,
+        (None, None),
+        attn_masks=[None, None],
+    )
+
+    outputs_classes = []
+    outputs_coords = []
+    for lvl in range(inter_states.shape[0]):
+        reference = init_reference if lvl == 0 else inter_references[lvl - 1]
+        reference = inverse_sigmoid(reference)
+        outputs_class = model.class_embed[lvl](inter_states[lvl])
+        tmp = model.bbox_embed[lvl](inter_states[lvl])
+        if reference.shape[-1] == 4:
+            tmp += reference
+        else:
+            tmp[..., :2] += reference
+        outputs_coord = tmp.sigmoid()
+        outputs_classes.append(outputs_class)
+        outputs_coords.append(outputs_coord)
+    outputs_class = torch.stack(outputs_classes)
+    outputs_coord = torch.stack(outputs_coords)
+
+    final_logits = outputs_class[-1]
+    final_boxes = outputs_coord[-1]
+    enc_logits = model.transformer.decoder.class_embed[-1](enc_state)
+
+    raw_outputs: list[dict[str, Any]] = []
+    aux_outputs = model._set_aux_loss(outputs_class, outputs_coord) if model.aux_loss else None
+    for batch_index in range(batch_size):
+        raw_output = {
+            "pred_logits": final_logits[batch_index].detach().cpu(),
+            "pred_boxes": final_boxes[batch_index].detach().cpu(),
+            "enc_outputs": {
+                "pred_logits": enc_logits[batch_index].detach().cpu(),
+                "pred_boxes": enc_reference[batch_index].detach().cpu(),
+            },
+        }
+        if aux_outputs is not None:
+            raw_output["aux_outputs"] = [
+                {
+                    "pred_logits": aux_output["pred_logits"][batch_index].detach().cpu(),
+                    "pred_boxes": aux_output["pred_boxes"][batch_index].detach().cpu(),
+                }
+                for aux_output in aux_outputs
+            ]
+        raw_outputs.append(raw_output)
+    return raw_outputs
+
+
+def _select_dino_topk(raw_output: dict[str, Any], image_size: tuple[int, int], topk: int) -> list[dict[str, Any]]:
+    """Select final DINO detections together with raw logits and aux-layer traces.
+
+    Inputs:
+    - `raw_output`: one image's raw DINO output dict
+    - `image_size`: `(height, width)` for the resized detector input space
+    - `topk`: number of detections to keep, matching DINO inference
+
+    Output:
+    - one row per selected detection, including:
+      query index, class index, score, selected logit, full class logits,
+      final box, and optional aux-layer logits/boxes for the same query
+    """
+
+    pred_logits = raw_output["pred_logits"]
+    pred_boxes = raw_output["pred_boxes"]
+    num_queries, num_classes = pred_logits.shape
+    probs = pred_logits.sigmoid()
+    topk_values, topk_indices = torch.topk(probs.reshape(-1), k=min(topk, probs.numel()))
+    query_indices = torch.div(topk_indices, num_classes, rounding_mode="floor")
+    class_indices = topk_indices % num_classes
+
+    selected_rows: list[dict[str, Any]] = []
+    image_h, image_w = image_size
+    scale = torch.tensor([image_w, image_h, image_w, image_h], dtype=pred_boxes.dtype)
+    for score, query_idx, class_idx in zip(topk_values, query_indices, class_indices):
+        query_idx_int = int(query_idx)
+        class_idx_int = int(class_idx)
+        box_cxcywh = pred_boxes[query_idx_int]
+        box_xyxy = box_cxcywh_to_xyxy(box_cxcywh.unsqueeze(0))[0] * scale
+        row = {
+            "query_index": query_idx_int,
+            "class_index": class_idx_int,
+            "score": float(score),
+            "selected_logit": float(pred_logits[query_idx_int, class_idx_int]),
+            "class_logits": pred_logits[query_idx_int].clone(),
+            "bbox_cxcywh": box_cxcywh.clone(),
+            "bbox_xyxy": box_xyxy.clone(),
+        }
+        if "aux_outputs" in raw_output:
+            row["aux_selected_logits"] = [
+                float(aux_output["pred_logits"][query_idx_int, class_idx_int])
+                for aux_output in raw_output["aux_outputs"]
+            ]
+            row["aux_class_logits"] = [
+                aux_output["pred_logits"][query_idx_int].clone()
+                for aux_output in raw_output["aux_outputs"]
+            ]
+            row["aux_bbox_xyxy"] = [
+                (box_cxcywh_to_xyxy(aux_output["pred_boxes"][query_idx_int].unsqueeze(0))[0] * scale).clone()
+                for aux_output in raw_output["aux_outputs"]
+            ]
+        selected_rows.append(row)
+    return selected_rows
+
+
 def run_daod_inference(
     adapter: DetrexAdapter,
     batch: dict[str, Any] | Iterable[dict[str, Any]],
@@ -242,4 +385,42 @@ def run_daod_inference(
             "prediction": output,
         }
         for sample, output in zip(samples, outputs)
+    ]
+
+
+def run_daod_inference_with_raw(
+    adapter: DetrexAdapter,
+    batch: dict[str, Any] | Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Run inference and keep both postprocessed detections and raw DINO outputs.
+
+    Inputs:
+    - one sample dict or an iterable of sample dicts
+
+    Output:
+    - list of per-sample dicts containing:
+      `prediction`: detectron2 postprocessed output
+      `raw_output`: raw DINO decoder output dict
+      `selected_detections`: final top-k detections with logits and aux traces
+    """
+
+    samples = [batch] if isinstance(batch, dict) else list(batch)
+    inputs = [_prepare_input(adapter, sample) for sample in samples]
+    with torch.no_grad():
+        processed_outputs = adapter.model(inputs)
+        raw_outputs = _run_dino_raw_outputs(adapter, inputs)
+
+    return [
+        {
+            "sample_id": sample["sample_id"],
+            "file_name": sample["file_name"],
+            "prediction": processed_output,
+            "raw_output": raw_output,
+            "selected_detections": _select_dino_topk(
+                raw_output,
+                (int(inp["height"]), int(inp["width"])),
+                int(getattr(adapter.model, "select_box_nums_for_evaluation", 300)),
+            ),
+        }
+        for sample, inp, processed_output, raw_output in zip(samples, inputs, processed_outputs, raw_outputs)
     ]
