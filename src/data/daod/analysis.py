@@ -14,7 +14,18 @@ import numpy as np
 
 
 def xyxy_iou(box_a: list[float], box_b: list[float]) -> float:
-    """Compute IoU between two `[x0, y0, x1, y1]` boxes."""
+    """Compute IoU between two boxes in `[x0, y0, x1, y1]` format.
+
+    Inputs:
+    - `box_a`, `box_b`: boxes in absolute pixel coordinates
+
+    Output:
+    - scalar IoU in `[0, 1]`
+
+    Coordinate convention:
+    - boxes are expected in the original image coordinate system unless the
+      caller explicitly works in another shared coordinate frame
+    """
 
     ax0, ay0, ax1, ay1 = [float(v) for v in box_a]
     bx0, by0, bx1, by1 = [float(v) for v in box_b]
@@ -48,6 +59,11 @@ def instances_to_prediction_rows(
     Output:
     - a list of rows, one per retained prediction, each with:
       `bbox`, `score`, `category_id`, and `category_name`
+
+    Coordinate convention:
+    - returned boxes stay in the coordinate system used by the incoming
+      `instances` object; callers are responsible for remapping boxes if a view
+      transform changed geometry before inference
     """
 
     if hasattr(instances, "to"):
@@ -97,6 +113,7 @@ def greedy_match_rows(
     - matching is intentionally simple and explainable
     - greedy highest-IoU matching is good enough for notebook-level analysis
       even though it is not the only possible assignment rule
+    - both input row lists must already use the same coordinate system
     """
 
     candidates: list[tuple[float, int, int]] = []
@@ -139,6 +156,11 @@ def match_predictions_to_gt(
     iou_thresh: float,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     """Match predictions to GT with class-aware greedy IoU matching.
+
+    Inputs:
+    - `gt_annotations`: GT annotations with `bbox` and `category_id`
+    - `pred_rows`: prediction rows with `bbox`, `score`, and `category_id`
+    - `iou_thresh`: minimum IoU required for a GT/prediction match
 
     Output:
     - `tp_rows`: matched GT/prediction pairs
@@ -198,14 +220,16 @@ def compute_proxy_summary(
     - a flat dict of image-level proxy scores
 
     Score meanings:
-    - confidence proxies: low-confidence mass, low-confidence fraction, score
-      variance, and prediction count
-    - disagreement proxies: unmatched weak/strong predictions, mean matched IoU,
-      class-disagreement count, and score-difference statistics
+    - confidence proxies: how uncertain or unstable the original-view detector
+      looks based on confidence magnitudes and spread
+    - disagreement proxies: how inconsistent weak/strong predictions look after
+      both views are expressed in the same image coordinate system
 
     Assumptions:
     - weak and strong boxes are already expressed in the original image
       coordinate system before calling this function
+    - no GT is used here; every returned score is intended to be a candidate
+      proxy that could still be computed when target labels are unavailable
     """
 
     orig_scores = np.asarray([row["score"] for row in original_rows], dtype=float)
@@ -253,7 +277,11 @@ def compute_proxy_summary(
 
 
 def zscore(values: list[float] | np.ndarray) -> np.ndarray:
-    """Return a stable z-score array, falling back to zeros for constant input."""
+    """Return a stable z-score array, falling back to zeros for constant input.
+
+    This is used in the notebook to combine heterogeneous proxy scores without
+    letting one raw numeric scale dominate only because of units.
+    """
 
     values = np.asarray(values, dtype=float)
     std = values.std()
