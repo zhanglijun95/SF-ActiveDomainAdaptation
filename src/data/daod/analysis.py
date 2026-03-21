@@ -422,6 +422,330 @@ def compute_decoder_proxy_summary(selected_detections: list[dict[str, Any]]) -> 
     }
 
 
+def raw_output_to_query_rows(
+    raw_output: dict[str, Any],
+    image_size: tuple[int, int],
+) -> list[dict[str, Any]]:
+    """Convert one image's raw DINO output into one row per decoder query.
+
+    Inputs:
+    - `raw_output`: raw output dict from `run_daod_inference_with_raw`
+    - `image_size`: `(height, width)` in the detector input coordinate system
+
+    Output:
+    - a list with one row per query. Each row stores:
+      - final box in absolute xyxy coordinates
+      - best foreground class and its sigmoid score
+      - foreground softmax entropy and top-1 / top-2 margin
+      - simple decoder stability summaries when aux outputs are available
+
+    Interpretation:
+    - these rows are designed for missed-object analysis, where we care about
+      low-confidence but still structured queries, not only confident final
+      detections.
+    """
+
+    pred_logits = raw_output["pred_logits"]
+    pred_boxes = raw_output["pred_boxes"]
+    image_h, image_w = image_size
+    scale = np.asarray([image_w, image_h, image_w, image_h], dtype=float)
+
+    query_rows: list[dict[str, Any]] = []
+    for query_index in range(pred_logits.shape[0]):
+        logits = pred_logits[query_index].detach().cpu().numpy().astype(float)
+        sigmoid_scores = 1.0 / (1.0 + np.exp(-logits))
+        softmax_probs = _softmax(logits)
+        softmax_probs = np.clip(softmax_probs, 1e-12, 1.0)
+
+        top_class = int(np.argmax(sigmoid_scores))
+        sorted_softmax = np.sort(softmax_probs)
+        softmax_margin = float(sorted_softmax[-1] - sorted_softmax[-2]) if len(sorted_softmax) >= 2 else 0.0
+
+        box_cxcywh = pred_boxes[query_index].detach().cpu().numpy().astype(float)
+        cx, cy, w, h = box_cxcywh
+        box_xyxy = np.asarray(
+            [cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0],
+            dtype=float,
+        ) * scale
+
+        row: dict[str, Any] = {
+            "query_index": int(query_index),
+            "bbox": [float(v) for v in box_xyxy.tolist()],
+            "score": float(sigmoid_scores[top_class]),
+            "category_id": top_class,
+            "top_class_logit": float(logits[top_class]),
+            "softmax_entropy": float(-(softmax_probs * np.log(softmax_probs)).sum() / np.log(len(softmax_probs))),
+            "softmax_margin": softmax_margin,
+        }
+
+        if "aux_outputs" in raw_output:
+            aux_top_classes = []
+            aux_selected_scores = []
+            aux_boxes = []
+            for aux_output in raw_output["aux_outputs"]:
+                aux_logits = aux_output["pred_logits"][query_index].detach().cpu().numpy().astype(float)
+                aux_sigmoid_scores = 1.0 / (1.0 + np.exp(-aux_logits))
+                aux_top_classes.append(int(np.argmax(aux_sigmoid_scores)))
+                aux_selected_scores.append(float(aux_sigmoid_scores[top_class]))
+
+                aux_cx, aux_cy, aux_w, aux_h = aux_output["pred_boxes"][query_index].detach().cpu().numpy().astype(float)
+                aux_xyxy = np.asarray(
+                    [aux_cx - aux_w / 2.0, aux_cy - aux_h / 2.0, aux_cx + aux_w / 2.0, aux_cy + aux_h / 2.0],
+                    dtype=float,
+                ) * scale
+                aux_boxes.append(aux_xyxy.tolist())
+
+            final_box = row["bbox"]
+            iou_gaps = [1.0 - xyxy_iou(final_box, aux_box) for aux_box in aux_boxes]
+            fx0, fy0, fx1, fy1 = final_box
+            final_center = np.asarray([(fx0 + fx1) / 2.0, (fy0 + fy1) / 2.0], dtype=float)
+            final_diag = max(np.hypot(fx1 - fx0, fy1 - fy0), 1e-6)
+            center_shifts = []
+            for aux_box in aux_boxes:
+                ax0, ay0, ax1, ay1 = aux_box
+                aux_center = np.asarray([(ax0 + ax1) / 2.0, (ay0 + ay1) / 2.0], dtype=float)
+                center_shifts.append(float(np.linalg.norm(aux_center - final_center) / final_diag))
+
+            row["decoder_score_std"] = float(np.std(aux_selected_scores))
+            row["decoder_top_class_flip"] = float(len(set(aux_top_classes)) > 1)
+            row["decoder_box_iou_gap"] = float(np.mean(iou_gaps))
+            row["decoder_center_shift"] = float(np.mean(center_shifts))
+
+        query_rows.append(row)
+    return query_rows
+
+
+def compute_missing_object_proxy_summary(
+    original_query_rows: list[dict[str, Any]],
+    weak_query_rows: list[dict[str, Any]],
+    strong_query_rows: list[dict[str, Any]],
+    *,
+    confident_score_thresh: float,
+    candidate_score_floor: float,
+    semantic_entropy_thresh: float,
+    semantic_margin_thresh: float,
+    geometry_iou_gap_thresh: float,
+    geometry_center_shift_thresh: float,
+    cross_view_iou_thresh: float,
+) -> dict[str, float]:
+    """Summarize image-level proxies for latent missed-object evidence.
+
+    Inputs:
+    - `original_query_rows`, `weak_query_rows`, `strong_query_rows`: one row
+      per decoder query, with boxes already expressed in the same coordinate
+      system
+    - thresholds define a transparent candidate rule:
+      - low absolute confidence, but not completely dead
+      - semantically sharp foreground preference
+      - geometrically stable decoder refinement
+
+    Output:
+    - image-level scores that estimate how much suppressed object evidence is
+      present even when few final detections survive thresholding
+
+    Assumptions:
+    - a latent missed-object candidate is a low-confidence query that still
+      looks structured in at least one of three ways:
+      semantic sharpness, geometric stability, or cross-view support
+    """
+
+    latent_rows = [
+        row
+        for row in original_query_rows
+        if candidate_score_floor <= row["score"] < confident_score_thresh
+    ]
+    if not latent_rows:
+        return {
+            "proxy_latent_query_count": 0.0,
+            "proxy_semantic_candidate_count": 0.0,
+            "proxy_geometry_candidate_count": 0.0,
+            "proxy_cross_view_supported_count": 0.0,
+            "proxy_latent_support_mass": 0.0,
+            "proxy_latent_composite_count": 0.0,
+        }
+
+    semantic_candidates = [
+        row
+        for row in latent_rows
+        if row["softmax_entropy"] <= semantic_entropy_thresh
+        and row["softmax_margin"] >= semantic_margin_thresh
+    ]
+    geometry_candidates = [
+        row
+        for row in latent_rows
+        if row.get("decoder_box_iou_gap", 1.0) <= geometry_iou_gap_thresh
+        and row.get("decoder_center_shift", 1.0) <= geometry_center_shift_thresh
+    ]
+
+    weak_matches, _, _ = greedy_match_rows(
+        latent_rows,
+        [row for row in weak_query_rows if candidate_score_floor <= row["score"] < confident_score_thresh],
+        iou_thresh=cross_view_iou_thresh,
+        class_aware=True,
+    )
+    strong_matches, _, _ = greedy_match_rows(
+        latent_rows,
+        [row for row in strong_query_rows if candidate_score_floor <= row["score"] < confident_score_thresh],
+        iou_thresh=cross_view_iou_thresh,
+        class_aware=True,
+    )
+    supported_original_indices = {
+        match["left_idx"] for match in weak_matches
+    } | {
+        match["left_idx"] for match in strong_matches
+    }
+
+    latent_support_mass = 0.0
+    composite_count = 0
+    for idx, row in enumerate(latent_rows):
+        semantic_flag = int(row in semantic_candidates)
+        geometry_flag = int(row in geometry_candidates)
+        cross_view_flag = int(idx in supported_original_indices)
+        latent_support_mass += float(semantic_flag + geometry_flag + cross_view_flag)
+        if semantic_flag + geometry_flag + cross_view_flag >= 2:
+            composite_count += 1
+
+    return {
+        "proxy_latent_query_count": float(len(latent_rows)),
+        "proxy_semantic_candidate_count": float(len(semantic_candidates)),
+        "proxy_geometry_candidate_count": float(len(geometry_candidates)),
+        "proxy_cross_view_supported_count": float(len(supported_original_indices)),
+        "proxy_latent_support_mass": float(latent_support_mass),
+        "proxy_latent_composite_count": float(composite_count),
+    }
+
+
+def score_semantic_structure(query_row: dict[str, Any]) -> float:
+    """Return a continuous semantic-structure score in `[0, 1]`.
+
+    Inputs:
+    - `query_row`: one row from `raw_output_to_query_rows`
+
+    Output:
+    - higher means the low-confidence query still shows a clearer foreground
+      class preference: low entropy and high top-class margin
+
+    Notes:
+    - this is not treated as a calibrated class probability
+    - it is only a relative sharpness score among foreground classes
+    """
+
+    entropy_term = 1.0 - float(np.clip(query_row.get("softmax_entropy", 1.0), 0.0, 1.0))
+    margin_term = float(np.clip(query_row.get("softmax_margin", 0.0), 0.0, 1.0))
+    return float(np.clip(entropy_term * margin_term, 0.0, 1.0))
+
+
+def score_geometry_structure(query_row: dict[str, Any]) -> float:
+    """Return a continuous geometry-stability score in `[0, 1]`.
+
+    Inputs:
+    - `query_row`: one row from `raw_output_to_query_rows`
+
+    Output:
+    - higher means the query box is more stable across decoder layers
+
+    Notes:
+    - IoU stability and center stability are combined multiplicatively so the
+      score is high only when both kinds of box stability are present
+    """
+
+    iou_stability = 1.0 - float(np.clip(query_row.get("decoder_box_iou_gap", 1.0), 0.0, 1.0))
+    center_stability = 1.0 - float(np.clip(query_row.get("decoder_center_shift", 1.0), 0.0, 1.0))
+    return float(np.clip(iou_stability * center_stability, 0.0, 1.0))
+
+
+def score_cross_view_support(
+    query_row: dict[str, Any],
+    view_rows: list[dict[str, Any]],
+    *,
+    match_iou_thresh: float,
+) -> float:
+    """Return a continuous cross-view support score in `[0, 1]`.
+
+    Inputs:
+    - `query_row`: one original-view low-confidence query row
+    - `view_rows`: low-confidence query rows from one other view, already in the
+      same coordinate system
+    - `match_iou_thresh`: minimum IoU for a meaningful cross-view match
+
+    Output:
+    - higher means there is a nearby same-class query in the other view with
+      both high overlap and similar score
+
+    Assumption:
+    - we intentionally keep the matching rule simple: same class and highest IoU
+      over candidates above the IoU threshold
+    """
+
+    best_score = 0.0
+    for other_row in view_rows:
+        if int(other_row["category_id"]) != int(query_row["category_id"]):
+            continue
+        iou = xyxy_iou(query_row["bbox"], other_row["bbox"])
+        if iou < match_iou_thresh:
+            continue
+        score_gap = abs(float(query_row["score"]) - float(other_row["score"]))
+        pair_score = float(np.clip(iou, 0.0, 1.0)) * float(np.clip(1.0 - score_gap, 0.0, 1.0))
+        best_score = max(best_score, pair_score)
+    return float(best_score)
+
+
+def summarize_scores(scores: list[float], *, top_k: int) -> dict[str, float]:
+    """Aggregate query-level scores into image-level summaries.
+
+    Inputs:
+    - `scores`: non-negative continuous query scores for one proxy family
+    - `top_k`: number of strongest queries used in the top-k summary
+
+    Output:
+    - `mean_all`: average score over all candidates
+    - `mean_topk`: average score over the top-k strongest candidates
+    - `max`: strongest single candidate score
+    """
+
+    if not scores:
+        return {
+            "mean_all": 0.0,
+            "mean_topk": 0.0,
+            "max": 0.0,
+        }
+
+    scores_np = np.asarray(scores, dtype=float)
+    top_k = max(int(top_k), 1)
+    top_scores = np.sort(scores_np)[-min(top_k, len(scores_np)) :]
+    return {
+        "mean_all": float(scores_np.mean()),
+        "mean_topk": float(top_scores.mean()),
+        "max": float(scores_np.max()),
+    }
+
+
+def percentile_rank_normalize(values: list[float] | np.ndarray) -> np.ndarray:
+    """Map values to percentile ranks in `[0, 1]`.
+
+    Inputs:
+    - one numeric value per image
+
+    Output:
+    - percentile-rank normalized array in `[0, 1]`
+
+    Why this normalization:
+    - we care about ranking images
+    - proxy distributions can be skewed
+    - percentile ranks avoid fragile mean/std assumptions
+    """
+
+    values = np.asarray(values, dtype=float)
+    if values.size == 0:
+        return values
+    order = np.argsort(values, kind="mergesort")
+    ranks = np.empty_like(order, dtype=float)
+    ranks[order] = np.arange(values.size, dtype=float)
+    if values.size == 1:
+        return np.zeros_like(ranks)
+    return ranks / float(values.size - 1)
+
+
 def compute_proxy_summary(
     original_rows: list[dict[str, Any]],
     weak_rows: list[dict[str, Any]],

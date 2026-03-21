@@ -40,6 +40,32 @@ def resolve_daod_oracle_run_dir(cfg: Any) -> Path:
     return root / "daod_oracle" / f"{source}__to__{target}" / model_name
 
 
+def resolve_daod_method_run_dir(cfg: Any) -> Path:
+    root = Path(getattr(cfg.run, "root_dir", "runs"))
+    source = _slug(str(cfg.data.source_domain))
+    target = _slug(str(cfg.data.target_domain))
+    model_name = _slug(str(cfg.detector.model_name))
+    method_cfg = getattr(cfg, "method", object())
+    exp_name = str(getattr(method_cfg, "exp_name", "")).strip()
+    if exp_name:
+        exp_tag = _slug(exp_name)
+    else:
+        num_rounds = int(getattr(method_cfg, "num_rounds", 1))
+        budget_total = str(getattr(method_cfg, "budget_total", "na")).replace(".", "p")
+        exp_tag = f"rounds{num_rounds}_budget{budget_total}"
+    return root / "daod_method" / exp_tag / f"{source}__to__{target}" / model_name
+
+
+def resolve_daod_source_ckpt_path(cfg: Any, which: str = "best") -> Path:
+    output_dir = resolve_daod_source_run_dir(cfg)
+    key = str(which).strip().lower()
+    if key in {"best", "model_best", "best_ckpt"}:
+        return output_dir / "model_best.pth"
+    if key in {"last", "latest", "final", "model_final"}:
+        return output_dir / "model_final.pth"
+    raise ValueError(f"Unsupported DAOD source checkpoint selector: {which}. Use one of: best, final")
+
+
 def resolve_source_ckpt_path(cfg: Any, which: str = "best") -> Path:
     ckpt_dir = resolve_source_run_dir(cfg) / "ckpt"
     key = str(which).strip().lower()

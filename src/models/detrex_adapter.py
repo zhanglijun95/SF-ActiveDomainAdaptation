@@ -229,7 +229,22 @@ def _prepare_input(adapter: DetrexAdapter, sample: dict[str, Any]) -> dict[str, 
     }
 
 
-def _run_dino_raw_outputs(adapter: DetrexAdapter, inputs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def prepare_daod_inputs(
+    adapter: DetrexAdapter,
+    batch: dict[str, Any] | Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Prepare one or more DAOD samples for the local detrex model path."""
+
+    samples = [batch] if isinstance(batch, dict) else list(batch)
+    return [_prepare_input(adapter, sample) for sample in samples]
+
+
+def _run_dino_raw_outputs(
+    adapter: DetrexAdapter,
+    inputs: list[dict[str, Any]],
+    *,
+    detach_to_cpu: bool,
+) -> list[dict[str, Any]]:
     """Run the local detrex DINO model and keep raw decoder outputs.
 
     Inputs:
@@ -295,18 +310,22 @@ def _run_dino_raw_outputs(adapter: DetrexAdapter, inputs: list[dict[str, Any]]) 
     aux_outputs = model._set_aux_loss(outputs_class, outputs_coord) if model.aux_loss else None
     for batch_index in range(batch_size):
         raw_output = {
-            "pred_logits": final_logits[batch_index].detach().cpu(),
-            "pred_boxes": final_boxes[batch_index].detach().cpu(),
+            "pred_logits": final_logits[batch_index].detach().cpu() if detach_to_cpu else final_logits[batch_index],
+            "pred_boxes": final_boxes[batch_index].detach().cpu() if detach_to_cpu else final_boxes[batch_index],
             "enc_outputs": {
-                "pred_logits": enc_logits[batch_index].detach().cpu(),
-                "pred_boxes": enc_reference[batch_index].detach().cpu(),
+                "pred_logits": enc_logits[batch_index].detach().cpu() if detach_to_cpu else enc_logits[batch_index],
+                "pred_boxes": enc_reference[batch_index].detach().cpu() if detach_to_cpu else enc_reference[batch_index],
             },
         }
         if aux_outputs is not None:
             raw_output["aux_outputs"] = [
                 {
-                    "pred_logits": aux_output["pred_logits"][batch_index].detach().cpu(),
-                    "pred_boxes": aux_output["pred_boxes"][batch_index].detach().cpu(),
+                    "pred_logits": aux_output["pred_logits"][batch_index].detach().cpu()
+                    if detach_to_cpu
+                    else aux_output["pred_logits"][batch_index],
+                    "pred_boxes": aux_output["pred_boxes"][batch_index].detach().cpu()
+                    if detach_to_cpu
+                    else aux_output["pred_boxes"][batch_index],
                 }
                 for aux_output in aux_outputs
             ]
@@ -314,7 +333,7 @@ def _run_dino_raw_outputs(adapter: DetrexAdapter, inputs: list[dict[str, Any]]) 
     return raw_outputs
 
 
-def _select_dino_topk(raw_output: dict[str, Any], image_size: tuple[int, int], topk: int) -> list[dict[str, Any]]:
+def select_dino_topk(raw_output: dict[str, Any], image_size: tuple[int, int], topk: int) -> list[dict[str, Any]]:
     """Select final DINO detections together with raw logits and aux-layer traces.
 
     Inputs:
@@ -370,12 +389,27 @@ def _select_dino_topk(raw_output: dict[str, Any], image_size: tuple[int, int], t
     return selected_rows
 
 
+def run_daod_raw_outputs(
+    adapter: DetrexAdapter,
+    batch: dict[str, Any] | Iterable[dict[str, Any]],
+    *,
+    with_grad: bool = False,
+) -> list[dict[str, Any]]:
+    """Run the DINO raw-output path and optionally keep gradients on the outputs."""
+
+    inputs = prepare_daod_inputs(adapter, batch)
+    if with_grad:
+        return _run_dino_raw_outputs(adapter, inputs, detach_to_cpu=False)
+    with torch.no_grad():
+        return _run_dino_raw_outputs(adapter, inputs, detach_to_cpu=True)
+
+
 def run_daod_inference(
     adapter: DetrexAdapter,
     batch: dict[str, Any] | Iterable[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     samples = [batch] if isinstance(batch, dict) else list(batch)
-    inputs = [_prepare_input(adapter, sample) for sample in samples]
+    inputs = prepare_daod_inputs(adapter, samples)
     with torch.no_grad():
         outputs = adapter.model(inputs)
     return [
@@ -405,10 +439,10 @@ def run_daod_inference_with_raw(
     """
 
     samples = [batch] if isinstance(batch, dict) else list(batch)
-    inputs = [_prepare_input(adapter, sample) for sample in samples]
+    inputs = prepare_daod_inputs(adapter, samples)
     with torch.no_grad():
         processed_outputs = adapter.model(inputs)
-        raw_outputs = _run_dino_raw_outputs(adapter, inputs)
+        raw_outputs = _run_dino_raw_outputs(adapter, inputs, detach_to_cpu=True)
 
     return [
         {
@@ -416,7 +450,7 @@ def run_daod_inference_with_raw(
             "file_name": sample["file_name"],
             "prediction": processed_output,
             "raw_output": raw_output,
-            "selected_detections": _select_dino_topk(
+            "selected_detections": select_dino_topk(
                 raw_output,
                 (int(inp["height"]), int(inp["width"])),
                 int(getattr(adapter.model, "select_box_nums_for_evaluation", 300)),

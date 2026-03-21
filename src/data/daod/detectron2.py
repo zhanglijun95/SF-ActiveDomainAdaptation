@@ -62,11 +62,14 @@ def _build_test_mapper(min_size_test: int, max_size_test: int) -> DetrDatasetMap
 
 
 def build_daod_detection_train_loader(cfg: Any, dataset_dicts: list[dict[str, Any]]):
+    train_cfg = getattr(cfg, "train", None)
+    if train_cfg is None:
+        train_cfg = getattr(getattr(cfg, "method", object()), "train", object())
     return build_detection_train_loader(
         dataset=dataset_dicts,
         mapper=_build_train_mapper(),
-        total_batch_size=int(cfg.train.batch_size),
-        num_workers=int(getattr(cfg.train, "num_workers", 4)),
+        total_batch_size=int(getattr(train_cfg, "batch_size", 8)),
+        num_workers=int(getattr(train_cfg, "num_workers", 4)),
     )
 
 
@@ -77,10 +80,13 @@ def build_daod_detection_test_loader(
     min_size_test: int = 800,
     max_size_test: int = 1333,
 ):
+    eval_cfg = getattr(cfg, "eval", None)
+    if eval_cfg is None:
+        eval_cfg = getattr(getattr(cfg, "method", object()), "eval", object())
     return build_detection_test_loader(
         dataset=dataset_dicts,
         mapper=_build_test_mapper(min_size_test=min_size_test, max_size_test=max_size_test),
-        num_workers=int(getattr(cfg.eval, "num_workers", 4)),
+        num_workers=int(getattr(eval_cfg, "num_workers", 4)),
     )
 
 

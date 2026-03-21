@@ -10,10 +10,17 @@ from .analysis import (
     classify_detection_errors,
     compute_decoder_proxy_summary,
     compute_logit_proxy_summary,
+    compute_missing_object_proxy_summary,
     compute_proxy_summary,
     greedy_match_rows,
     instances_to_prediction_rows,
     match_predictions_to_gt,
+    percentile_rank_normalize,
+    raw_output_to_query_rows,
+    score_cross_view_support,
+    score_geometry_structure,
+    score_semantic_structure,
+    summarize_scores,
     xyxy_iou,
     zscore,
 )
@@ -32,6 +39,13 @@ from .transforms import (
     make_weak_view,
     map_boxes_to_original_view,
 )
+from .wrappers import (
+    DAODListDataset,
+    build_strong_view_sample,
+    build_weak_view_sample,
+    collate_daod_batch,
+    cycle_daod_loader,
+)
 
 __all__ = [
     "CITYSCAPES_THING_CLASSES",
@@ -46,6 +60,13 @@ __all__ = [
     "compute_proxy_summary",
     "compute_logit_proxy_summary",
     "compute_decoder_proxy_summary",
+    "raw_output_to_query_rows",
+    "compute_missing_object_proxy_summary",
+    "score_semantic_structure",
+    "score_geometry_structure",
+    "score_cross_view_support",
+    "summarize_scores",
+    "percentile_rank_normalize",
     "zscore",
     "build_daod_dataset",
     "get_daod_thing_classes",
@@ -59,4 +80,9 @@ __all__ = [
     "make_weak_view",
     "make_strong_view",
     "map_boxes_to_original_view",
+    "DAODListDataset",
+    "collate_daod_batch",
+    "cycle_daod_loader",
+    "build_weak_view_sample",
+    "build_strong_view_sample",
 ]
