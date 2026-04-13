@@ -472,6 +472,7 @@ def raw_output_to_query_rows(
             "query_index": int(query_index),
             "bbox": [float(v) for v in box_xyxy.tolist()],
             "score": float(sigmoid_scores[top_class]),
+            "class_index": top_class,
             "category_id": top_class,
             "top_class_logit": float(logits[top_class]),
             "softmax_entropy": float(-(softmax_probs * np.log(softmax_probs)).sum() / np.log(len(softmax_probs))),

@@ -1,0 +1,12 @@
+# Exclude large/unnecessary dirs
+runs/
+notebooks/
+imgs/
+doc/
+.git/
+__pycache__/
+*.pyc
+
+# Do NOT exclude external/ — we need detrex code + projects configs
+# But skip the large pretrained checkpoint
+external/detrex/ckpts/

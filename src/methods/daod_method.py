@@ -17,6 +17,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
+import random
+import time
 from typing import Any
 
 import numpy as np
@@ -34,7 +36,7 @@ from src.data.daod.analysis import (
 )
 from src.engine.daod_round_trainer import DAODMeanTeacherRoundTrainer
 from src.engine.utils import resolve_daod_method_run_dir, resolve_daod_source_ckpt_path, save_json
-from src.models.detrex_adapter import build_daod_model, run_daod_inference_with_raw
+from src.models.detrex_adapter import build_daod_model, run_daod_raw_outputs
 
 
 @dataclass
@@ -56,6 +58,9 @@ class DAODRoundState:
     budget_used: int
     teacher_checkpoint: str
     student_checkpoint: str
+    optimizer_checkpoint: str | None = None
+    scheduler_checkpoint: str | None = None
+    global_step: int = 0
 
 
 @dataclass
@@ -214,7 +219,10 @@ def _semantic_feature_bundle(
         prediction_score_thresh=prediction_score_thresh,
     )
     semantic_scores = [score_semantic_structure(row) for row in latent_query_rows]
-    return _summary_feature_dict(semantic_scores, prefix="semantic", top_k=top_k)
+    features = _summary_feature_dict(semantic_scores, prefix="semantic", top_k=top_k)
+    ambiguity_scores = [1.0 - float(score) for score in semantic_scores]
+    features.update(_summary_feature_dict(ambiguity_scores, prefix="semantic_ambiguity", top_k=top_k))
+    return features
 
 
 def _geometry_feature_bundle(
@@ -232,7 +240,10 @@ def _geometry_feature_bundle(
         prediction_score_thresh=prediction_score_thresh,
     )
     geometry_scores = [score_geometry_structure(row) for row in latent_query_rows]
-    return _summary_feature_dict(geometry_scores, prefix="geometry", top_k=top_k)
+    features = _summary_feature_dict(geometry_scores, prefix="geometry", top_k=top_k)
+    instability_scores = [1.0 - float(score) for score in geometry_scores]
+    features.update(_summary_feature_dict(instability_scores, prefix="geometry_instability", top_k=top_k))
+    return features
 
 
 def _cross_view_feature_bundle(
@@ -267,7 +278,138 @@ def _cross_view_feature_bundle(
         weak_support = score_cross_view_support(row, weak_latent_rows, match_iou_thresh=cross_view_iou_thresh)
         strong_support = score_cross_view_support(row, strong_latent_rows, match_iou_thresh=cross_view_iou_thresh)
         cross_view_scores.append(max(weak_support, strong_support))
-    return _summary_feature_dict(cross_view_scores, prefix="cross_view", top_k=top_k)
+    features = _summary_feature_dict(cross_view_scores, prefix="cross_view", top_k=top_k)
+    inconsistency_scores = [1.0 - float(score) for score in cross_view_scores]
+    features.update(_summary_feature_dict(inconsistency_scores, prefix="cross_view_inconsistency", top_k=top_k))
+    return features
+
+
+def _teacher_student_feature_bundle(
+    teacher_weak_query_rows: list[dict[str, Any]],
+    student_strong_query_rows: list[dict[str, Any]],
+    *,
+    top_k: int,
+    cross_view_iou_thresh: float,
+    latent_score_floor: float,
+    prediction_score_thresh: float,
+) -> dict[str, float]:
+    """Teacher-weak vs student-strong support/disagreement on latent queries."""
+
+    teacher_latent_rows = _latent_rows(
+        teacher_weak_query_rows,
+        latent_score_floor=latent_score_floor,
+        prediction_score_thresh=prediction_score_thresh,
+    )
+    student_latent_rows = _latent_rows(
+        student_strong_query_rows,
+        latent_score_floor=latent_score_floor,
+        prediction_score_thresh=prediction_score_thresh,
+    )
+    support_scores = [
+        score_cross_view_support(row, student_latent_rows, match_iou_thresh=cross_view_iou_thresh)
+        for row in teacher_latent_rows
+    ]
+    features = _summary_feature_dict(support_scores, prefix="teacher_student", top_k=top_k)
+    disagreement_scores = [1.0 - float(score) for score in support_scores]
+    features.update(_summary_feature_dict(disagreement_scores, prefix="teacher_student_disagreement", top_k=top_k))
+    return features
+
+
+def _coverage_gap_feature_bundle(
+    original_query_rows: list[dict[str, Any]],
+    weak_query_rows: list[dict[str, Any]],
+    strong_query_rows: list[dict[str, Any]],
+    *,
+    cross_view_iou_thresh: float,
+    latent_score_floor: float,
+    prediction_score_thresh: float,
+) -> dict[str, float]:
+    """Image-level gap between supported latent hypotheses and confident detections."""
+
+    latent_query_rows = _latent_rows(
+        original_query_rows,
+        latent_score_floor=latent_score_floor,
+        prediction_score_thresh=prediction_score_thresh,
+    )
+    weak_latent_rows = _latent_rows(
+        weak_query_rows,
+        latent_score_floor=latent_score_floor,
+        prediction_score_thresh=prediction_score_thresh,
+    )
+    strong_latent_rows = _latent_rows(
+        strong_query_rows,
+        latent_score_floor=latent_score_floor,
+        prediction_score_thresh=prediction_score_thresh,
+    )
+    confident_count = float(sum(1 for row in original_query_rows if row["score"] >= prediction_score_thresh))
+    supported_latent_count = 0.0
+    for row in latent_query_rows:
+        weak_support = score_cross_view_support(row, weak_latent_rows, match_iou_thresh=cross_view_iou_thresh)
+        strong_support = score_cross_view_support(row, strong_latent_rows, match_iou_thresh=cross_view_iou_thresh)
+        if max(weak_support, strong_support) >= 0.5:
+            supported_latent_count += 1.0
+    coverage_gap_count = max(supported_latent_count - confident_count, 0.0)
+    coverage_gap_ratio = supported_latent_count / max(confident_count, 1.0)
+    return {
+        "supported_latent_count": supported_latent_count,
+        "coverage_gap_count": coverage_gap_count,
+        "coverage_gap_ratio": float(coverage_gap_ratio),
+    }
+
+
+def _build_class_rarity_lookup(
+    target_train: list[dict[str, Any]] | Any,
+    labeled_ids: set[str],
+    *,
+    num_classes: int,
+) -> dict[int, float]:
+    """Inverse-frequency rarity weights from the currently labeled target set."""
+
+    class_counts = np.zeros(max(int(num_classes), 1), dtype=float)
+    for sample in target_train:
+        if sample["sample_id"] not in labeled_ids:
+            continue
+        annotations = sample.get("annotations", [])
+        for ann in annotations:
+            category_id = int(ann.get("category_id", -1))
+            if 0 <= category_id < len(class_counts):
+                class_counts[category_id] += 1.0
+    rarity = 1.0 / np.sqrt(class_counts + 1.0)
+    return {idx: float(value) for idx, value in enumerate(rarity.tolist())}
+
+
+def _class_rarity_feature_bundle(
+    original_query_rows: list[dict[str, Any]],
+    *,
+    class_rarity_lookup: dict[int, float],
+    latent_score_floor: float,
+) -> dict[str, float]:
+    """Rarity of classes predicted in this image relative to current labeled set."""
+
+    class_scores: dict[int, float] = {}
+    for row in original_query_rows:
+        score = float(row["score"])
+        if score < latent_score_floor:
+            continue
+        category_id = int(row["category_id"])
+        class_scores[category_id] = max(class_scores.get(category_id, 0.0), score)
+    if not class_scores:
+        return {
+            "class_rarity_mean": 0.0,
+            "class_rarity_max": 0.0,
+        }
+    weighted_values = []
+    weights = []
+    max_value = 0.0
+    for category_id, score in class_scores.items():
+        rarity = float(class_rarity_lookup.get(category_id, 1.0))
+        weighted_values.append(rarity * score)
+        weights.append(score)
+        max_value = max(max_value, rarity)
+    return {
+        "class_rarity_mean": float(sum(weighted_values) / max(sum(weights), 1e-12)),
+        "class_rarity_max": float(max_value),
+    }
 
 
 def _confident_feature_bundle(
@@ -293,11 +435,25 @@ def _required_feature_bundles(signal_names: list[str]) -> set[str]:
     for name in signal_names:
         if name == "latent_query_count":
             bundles.add("latent")
+        elif name.startswith("coverage_gap_") or name == "supported_latent_count":
+            bundles.add("coverage_gap")
+        elif name.startswith("class_rarity_"):
+            bundles.add("class_rarity")
+        elif name.startswith("teacher_student_disagreement_"):
+            bundles.add("teacher_student")
+        elif name.startswith("teacher_student_"):
+            bundles.add("teacher_student")
         elif name.startswith("semantic_"):
+            bundles.add("semantic")
+        elif name.startswith("semantic_ambiguity_"):
             bundles.add("semantic")
         elif name.startswith("geometry_"):
             bundles.add("geometry")
+        elif name.startswith("geometry_instability_"):
+            bundles.add("geometry")
         elif name.startswith("cross_view_"):
+            bundles.add("cross_view")
+        elif name.startswith("cross_view_inconsistency_"):
             bundles.add("cross_view")
         elif name.startswith("confident_"):
             bundles.add("confident")
@@ -315,6 +471,16 @@ def _normalize_values(values: list[float], *, norm_type: str) -> list[float]:
     kind = str(norm_type).strip().lower()
     if kind == "rank":
         return percentile_rank_normalize(values).tolist()
+    if kind in {"minmax", "min-max", "min_max"}:
+        arr = np.asarray(values, dtype=float)
+        if arr.size == 0:
+            return []
+        min_value = float(arr.min())
+        max_value = float(arr.max())
+        scale = max_value - min_value
+        if scale <= 1e-12:
+            return [0.0] * len(values)
+        return ((arr - min_value) / scale).tolist()
     if kind in {"zscore", "z-score", "z_score"}:
         arr = np.asarray(values, dtype=float)
         std = float(arr.std())
@@ -322,7 +488,7 @@ def _normalize_values(values: list[float], *, norm_type: str) -> list[float]:
             return [0.0] * len(values)
         mean = float(arr.mean())
         return ((arr - mean) / std).tolist()
-    raise ValueError(f"Unsupported selection normalization: {norm_type}. Use 'rank' or 'zscore'.")
+    raise ValueError(f"Unsupported selection normalization: {norm_type}. Use 'rank', 'minmax', or 'zscore'.")
 
 
 class BaseDAODRoundTrainer:
@@ -340,6 +506,9 @@ class BaseDAODRoundTrainer:
         return {
             "teacher_checkpoint": state_in.teacher_checkpoint,
             "student_checkpoint": state_in.student_checkpoint,
+            "optimizer_checkpoint": state_in.optimizer_checkpoint,
+            "scheduler_checkpoint": state_in.scheduler_checkpoint,
+            "global_step": state_in.global_step,
             "status": "no_training",
         }
 
@@ -378,8 +547,14 @@ class DAODRoundMethod:
             selection_cfg,
             default_specs=[("geometry_mean_all", 1.0)],
         )
+        self.selection_strategy = str(getattr(selection_cfg, "strategy", "score")).strip().lower()
         self.selection_signal_names = [name for name, _ in self.selection_specs]
         self.required_bundles = _required_feature_bundles(self.selection_signal_names)
+        self.selection_needs_aug_views = bool(
+            {"cross_view", "teacher_student", "coverage_gap"} & self.required_bundles
+        )
+        self.selection_batch_size = int(getattr(selection_cfg, "batch_size", 8))
+        self.selection_log_period = int(getattr(selection_cfg, "log_period", 50))
 
     def _build_adapter(self, checkpoint_path: str):
         adapter = build_daod_model(self.cfg, load_weights=False)
@@ -392,39 +567,40 @@ class DAODRoundMethod:
         adapter.model.eval()
         return adapter
 
-    def _sample_feature_row(self, adapter, sample: dict[str, Any]) -> dict[str, float]:
-        """Compute all configured selection features for one target-train image.
-
-        Important design:
-        - the planner always keeps all original / weak / strong query rows
-        - each bundle decides internally which confidence region it uses
-        - the active bundles are chosen from the configured selection signals
-        """
-
-        original_image = Image.open(sample["file_name"]).convert("RGB")
-        weak_image, weak_meta = make_weak_view(original_image.copy())
-        strong_image, strong_meta = make_strong_view(original_image.copy())
-
-        def _clone_with_image(image: Image.Image, suffix: str) -> dict[str, Any]:
-            cloned = dict(sample)
-            cloned["image"] = image
-            cloned["sample_id"] = f"{sample['sample_id']}::{suffix}"
-            return cloned
-
-        original_output = run_daod_inference_with_raw(adapter, sample)[0]
-        weak_output = run_daod_inference_with_raw(adapter, _clone_with_image(weak_image, "weak"))[0]
-        strong_output = run_daod_inference_with_raw(adapter, _clone_with_image(strong_image, "strong"))[0]
+    def _feature_row_from_raw_views(
+        self,
+        sample: dict[str, Any],
+        *,
+        original_raw: dict[str, Any],
+        teacher_weak_raw: dict[str, Any] | None,
+        weak_raw: dict[str, Any] | None,
+        strong_raw: dict[str, Any] | None,
+        weak_meta: dict[str, Any] | None,
+        strong_meta: dict[str, Any] | None,
+        class_rarity_lookup: dict[int, float] | None = None,
+    ) -> dict[str, float]:
+        """Build one image's selection features from already-computed raw views."""
 
         image_size = (sample["height"], sample["width"])
-        original_rows = raw_output_to_query_rows(original_output["raw_output"], image_size=image_size)
-        weak_rows = _remap_rows_to_original(
-            raw_output_to_query_rows(weak_output["raw_output"], image_size=image_size),
-            weak_meta,
-        )
-        strong_rows = _remap_rows_to_original(
-            raw_output_to_query_rows(strong_output["raw_output"], image_size=image_size),
-            strong_meta,
-        )
+        original_rows = raw_output_to_query_rows(original_raw, image_size=image_size)
+        teacher_weak_rows: list[dict[str, Any]] = []
+        weak_rows: list[dict[str, Any]] = []
+        strong_rows: list[dict[str, Any]] = []
+        if teacher_weak_raw is not None and weak_meta is not None:
+            teacher_weak_rows = _remap_rows_to_original(
+                raw_output_to_query_rows(teacher_weak_raw, image_size=image_size),
+                weak_meta,
+            )
+        if weak_raw is not None and weak_meta is not None:
+            weak_rows = _remap_rows_to_original(
+                raw_output_to_query_rows(weak_raw, image_size=image_size),
+                weak_meta,
+            )
+        if strong_raw is not None and strong_meta is not None:
+            strong_rows = _remap_rows_to_original(
+                raw_output_to_query_rows(strong_raw, image_size=image_size),
+                strong_meta,
+            )
 
         features: dict[str, float] = {}
         if "latent" in self.required_bundles:
@@ -465,6 +641,28 @@ class DAODRoundMethod:
                     prediction_score_thresh=self.prediction_score_thresh,
                 )
             )
+        if "teacher_student" in self.required_bundles:
+            features.update(
+                _teacher_student_feature_bundle(
+                    teacher_weak_rows,
+                    strong_rows,
+                    top_k=self.top_k,
+                    cross_view_iou_thresh=self.cross_view_iou_thresh,
+                    latent_score_floor=self.latent_score_floor,
+                    prediction_score_thresh=self.prediction_score_thresh,
+                )
+            )
+        if "coverage_gap" in self.required_bundles:
+            features.update(
+                _coverage_gap_feature_bundle(
+                    original_rows,
+                    weak_rows,
+                    strong_rows,
+                    cross_view_iou_thresh=self.cross_view_iou_thresh,
+                    latent_score_floor=self.latent_score_floor,
+                    prediction_score_thresh=self.prediction_score_thresh,
+                )
+            )
         if "confident" in self.required_bundles:
             features.update(
                 _confident_feature_bundle(
@@ -472,9 +670,29 @@ class DAODRoundMethod:
                     prediction_score_thresh=self.prediction_score_thresh,
                 )
             )
+        if "class_rarity" in self.required_bundles and class_rarity_lookup is not None:
+            features.update(
+                _class_rarity_feature_bundle(
+                    original_rows,
+                    class_rarity_lookup=class_rarity_lookup,
+                    latent_score_floor=self.latent_score_floor,
+                )
+            )
         return features
 
-    def infer_target_train(self, checkpoint_path: str) -> list[DAODSamplePlan]:
+    def _selection_batches(self) -> list[list[dict[str, Any]]]:
+        batches: list[list[dict[str, Any]]] = []
+        current: list[dict[str, Any]] = []
+        for index in range(len(self.target_train)):
+            current.append(self.target_train[index])
+            if len(current) >= self.selection_batch_size:
+                batches.append(current)
+                current = []
+        if current:
+            batches.append(current)
+        return batches
+
+    def infer_target_train(self, state_in: DAODRoundState) -> list[DAODSamplePlan]:
         """Score every target-train image for human-label selection.
 
         Steps:
@@ -483,54 +701,189 @@ class DAODRoundMethod:
         3. combine the configured selection signals into one selection score
         """
 
-        adapter = self._build_adapter(checkpoint_path)
-        sample_plans: list[DAODSamplePlan] = []
-        raw_feature_rows: list[dict[str, Any]] = []
-        for index in range(len(self.target_train)):
-            sample = self.target_train[index]
-            features = self._sample_feature_row(adapter, sample)
-            raw_feature_rows.append(
-                {
-                    "sample_id": sample["sample_id"],
-                    "file_name": sample["file_name"],
-                    **features,
-                }
-            )
-
-        # Normalize every numeric feature according to `selection.norm` so
-        # weighted sums across different signal families stay on a comparable
-        # scale.
-        numeric_keys = [key for key in raw_feature_rows[0].keys() if key not in {"sample_id", "file_name"}] if raw_feature_rows else []
-        for key in numeric_keys:
-            values = [float(row[key]) for row in raw_feature_rows]
-            normalized = _normalize_values(values, norm_type=self.selection_norm)
-            for row, value in zip(raw_feature_rows, normalized):
-                row[key] = float(value)
-
-        for row in raw_feature_rows:
-            selection_score, selection_parts = _weighted_score(self.selection_specs, row)
-            sample_plans.append(
-                DAODSamplePlan(
-                    sample_id=str(row["sample_id"]),
-                    file_name=str(row["file_name"]),
-                    selection_score=selection_score,
-                    selection_signals=selection_parts,
-                    features={key: float(value) for key, value in row.items() if key not in {"sample_id", "file_name"}},
+        student_adapter = self._build_adapter(state_in.student_checkpoint)
+        teacher_adapter = self._build_adapter(state_in.teacher_checkpoint) if "teacher_student" in self.required_bundles else None
+        try:
+            sample_plans: list[DAODSamplePlan] = []
+            raw_feature_rows: list[dict[str, Any]] = []
+            total_samples = len(self.target_train)
+            batches = self._selection_batches()
+            started_at = time.time()
+            class_rarity_lookup = (
+                _build_class_rarity_lookup(
+                    self.target_train,
+                    set(state_in.queried_ids),
+                    num_classes=int(getattr(self.cfg.data, "num_classes", 1)),
                 )
+                if "class_rarity" in self.required_bundles
+                else None
             )
-        return sample_plans
+
+            for batch_idx, sample_batch in enumerate(batches, start=1):
+                original_batch: list[dict[str, Any]] = []
+                weak_batch: list[dict[str, Any]] = []
+                strong_batch: list[dict[str, Any]] = []
+                batch_context: list[dict[str, Any]] = []
+
+                for sample in sample_batch:
+                    original_image = Image.open(sample["file_name"]).convert("RGB")
+                    weak_meta = None
+                    strong_meta = None
+
+                    original_item = dict(sample)
+                    original_item["image"] = original_image
+
+                    original_batch.append(original_item)
+                    if self.selection_needs_aug_views:
+                        weak_image, weak_meta = make_weak_view(original_image.copy())
+                        strong_image, strong_meta = make_strong_view(original_image.copy())
+
+                        weak_item = dict(sample)
+                        weak_item["image"] = weak_image
+                        weak_item["sample_id"] = f"{sample['sample_id']}::weak"
+
+                        strong_item = dict(sample)
+                        strong_item["image"] = strong_image
+                        strong_item["sample_id"] = f"{sample['sample_id']}::strong"
+
+                        weak_batch.append(weak_item)
+                        strong_batch.append(strong_item)
+                    batch_context.append(
+                        {
+                            "sample": sample,
+                            "weak_meta": weak_meta,
+                            "strong_meta": strong_meta,
+                        }
+                    )
+
+                original_raw_outputs = run_daod_raw_outputs(student_adapter, original_batch, with_grad=False)
+                weak_raw_outputs = (
+                    run_daod_raw_outputs(student_adapter, weak_batch, with_grad=False)
+                    if weak_batch
+                    else [None] * len(sample_batch)
+                )
+                strong_raw_outputs = (
+                    run_daod_raw_outputs(student_adapter, strong_batch, with_grad=False)
+                    if strong_batch
+                    else [None] * len(sample_batch)
+                )
+                teacher_weak_raw_outputs = (
+                    run_daod_raw_outputs(teacher_adapter, weak_batch, with_grad=False)
+                    if teacher_adapter is not None and weak_batch
+                    else [None] * len(sample_batch)
+                )
+
+                for context, original_raw, teacher_weak_raw, weak_raw, strong_raw in zip(
+                    batch_context, original_raw_outputs, teacher_weak_raw_outputs, weak_raw_outputs, strong_raw_outputs
+                ):
+                    sample = context["sample"]
+                    features = self._feature_row_from_raw_views(
+                        sample,
+                        original_raw=original_raw,
+                        teacher_weak_raw=teacher_weak_raw,
+                        weak_raw=weak_raw,
+                        strong_raw=strong_raw,
+                        weak_meta=context["weak_meta"],
+                        strong_meta=context["strong_meta"],
+                        class_rarity_lookup=class_rarity_lookup,
+                    )
+                    raw_feature_rows.append(
+                        {
+                            "sample_id": sample["sample_id"],
+                            "file_name": sample["file_name"],
+                            **features,
+                        }
+                    )
+
+                if self.selection_log_period > 0 and (
+                    batch_idx == 1
+                    or batch_idx % self.selection_log_period == 0
+                    or batch_idx == len(batches)
+                ):
+                    done = min(batch_idx * self.selection_batch_size, total_samples)
+                    elapsed = time.time() - started_at
+                    print(
+                        f"[DAOD][selection] {done}/{total_samples} images "
+                        f"({batch_idx}/{len(batches)} batches, bs={self.selection_batch_size}) "
+                        f"elapsed={elapsed:.1f}s"
+                    )
+
+            # Normalize every numeric feature according to `selection.norm` so
+            # weighted sums across different signal families stay on a comparable
+            # scale.
+            numeric_keys = [key for key in raw_feature_rows[0].keys() if key not in {"sample_id", "file_name"}] if raw_feature_rows else []
+            for key in numeric_keys:
+                values = [float(row[key]) for row in raw_feature_rows]
+                normalized = _normalize_values(values, norm_type=self.selection_norm)
+                for row, value in zip(raw_feature_rows, normalized):
+                    row[key] = float(value)
+
+            for row in raw_feature_rows:
+                selection_score, selection_parts = _weighted_score(self.selection_specs, row)
+                sample_plans.append(
+                    DAODSamplePlan(
+                        sample_id=str(row["sample_id"]),
+                        file_name=str(row["file_name"]),
+                        selection_score=selection_score,
+                        selection_signals=selection_parts,
+                        features={key: float(value) for key, value in row.items() if key not in {"sample_id", "file_name"}},
+                    )
+                )
+            return sample_plans
+        finally:
+            for adapter in (student_adapter, teacher_adapter):
+                if adapter is None:
+                    continue
+                if hasattr(adapter, "model"):
+                    try:
+                        adapter.model.cpu()
+                    except Exception:
+                        pass
+                del adapter
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     def _select_top_scored(self, candidates: list[DAODSamplePlan], budget_k: int) -> list[str]:
         if budget_k <= 0 or not candidates:
             return []
         return [plan.sample_id for plan in candidates[:budget_k]]
 
+    def _random_sample_plans(self) -> list[DAODSamplePlan]:
+        """Create placeholder sample plans for random-selection baselines."""
+
+        sample_plans: list[DAODSamplePlan] = []
+        for sample in self.target_train:
+            sample_plans.append(
+                DAODSamplePlan(
+                    sample_id=str(sample["sample_id"]),
+                    file_name=str(sample["file_name"]),
+                    selection_score=0.0,
+                    selection_signals={},
+                    features={},
+                )
+            )
+        return sample_plans
+
+    def _select_random(self, candidates: list[DAODSamplePlan], budget_k: int, *, round_idx: int) -> list[str]:
+        if budget_k <= 0 or not candidates:
+            return []
+        rng = random.Random(int(getattr(self.cfg, "seed", 42)) + int(round_idx))
+        candidate_ids = [plan.sample_id for plan in candidates]
+        rng.shuffle(candidate_ids)
+        return candidate_ids[:budget_k]
+
     def plan_round(self, state_in: DAODRoundState, budget_k: int) -> DAODRoundPlan:
-        sample_plans = self.infer_target_train(state_in.student_checkpoint)
-        sample_plans.sort(key=lambda plan: plan.selection_score, reverse=True)
+        if self.selection_strategy == "random":
+            sample_plans = self._random_sample_plans()
+        else:
+            sample_plans = self.infer_target_train(state_in)
+            sample_plans.sort(key=lambda plan: plan.selection_score, reverse=True)
 
         available = [plan for plan in sample_plans if plan.sample_id not in state_in.queried_ids]
-        queried_ids = self._select_top_scored(available, budget_k)
+        if self.selection_strategy == "random":
+            queried_ids = self._select_random(available, budget_k, round_idx=state_in.round_idx)
+        else:
+            queried_ids = self._select_top_scored(available, budget_k)
 
         return DAODRoundPlan(
             round_idx=state_in.round_idx,
@@ -568,6 +921,9 @@ class DAODRoundMethod:
             budget_used=state_in.budget_used + len(plan.queried_ids),
             teacher_checkpoint=str(trainer_summary["teacher_checkpoint"]),
             student_checkpoint=str(trainer_summary["student_checkpoint"]),
+            optimizer_checkpoint=trainer_summary.get("optimizer_checkpoint"),
+            scheduler_checkpoint=trainer_summary.get("scheduler_checkpoint"),
+            global_step=int(trainer_summary.get("global_step", state_in.global_step)),
         )
         save_daod_round_state(self.run_dir / "state_last.json", state_out)
         save_json(
@@ -595,6 +951,9 @@ class DAODRoundMethod:
                 budget_used=0,
                 teacher_checkpoint=str(source_ckpt),
                 student_checkpoint=str(source_ckpt),
+                optimizer_checkpoint=None,
+                scheduler_checkpoint=None,
+                global_step=0,
             )
         else:
             state = state_init
@@ -614,4 +973,7 @@ def build_default_daod_round_state(cfg: Any) -> DAODRoundState:
         budget_used=0,
         teacher_checkpoint=str(source_ckpt),
         student_checkpoint=str(source_ckpt),
+        optimizer_checkpoint=None,
+        scheduler_checkpoint=None,
+        global_step=0,
     )
