@@ -14,6 +14,9 @@ Env vars you can override:
 import argparse
 import subprocess
 import sys
+import time
+import random
+from pathlib import Path
 
 import boto3
 import sagemaker
@@ -128,6 +131,9 @@ def main():
     else:
         image_uri = _build_and_push_image(account, region)
 
+    config_tag = Path(args.config).stem.replace("round_cityscapes_to_foggy_cityscapes_dino_", "").replace("_", "-")[:40]
+    job_name = f"sfada-{config_tag}-{int(time.time())}-{random.randint(0, 999):03d}"
+
     estimator = Estimator(
         image_uri=image_uri,
         role=role,
@@ -157,7 +163,7 @@ def main():
     if args.s3_source_ckpt:
         inputs["source_ckpt"] = args.s3_source_ckpt
 
-    estimator.fit(inputs)
+    estimator.fit(inputs, job_name=job_name)
 
 
 if __name__ == "__main__":

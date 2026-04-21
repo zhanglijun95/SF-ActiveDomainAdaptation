@@ -1,0 +1,119 @@
+seed: 42
+
+run:
+  root_dir: runs
+
+data:
+  root: /home/ljzhang/data/ins-seg/cityscapes
+  source_domain: cityscapes
+  target_domain: foggy_cityscapes
+  foggy_beta: "0.02"
+  num_classes: 8
+
+detector:
+  model_name: dino_r50_4scale_12ep
+  checkpoint_name: dino_r50_4scale_12ep_49_2AP.pth
+  source_ckpt: final
+  min_size_test: 800
+  max_size_test: 1333
+
+method:
+  exp_name: daod_round_mean_teacher
+  num_rounds: 5
+  round_epochs: 1
+  # If this is in (0, 1], it is interpreted as a ratio of target_train.
+  # Example: 0.05 means we can ask for human labels on 5% of target_train
+  # across all rounds combined.
+  budget_total: 0.05
+
+  selection:
+    # How to normalize image-level features before weighted score combination.
+    # - `rank`: percentile-rank normalization
+    # - `zscore`: standard score normalization
+    norm: rank
+    # Batch size for the selection-side original / weak / strong inference
+    # passes over target_train. Larger is faster but uses more GPU memory.
+    batch_size: 16
+    # Print selection progress every N batches.
+    log_period: 50
+    features:
+      # Queries above this score are treated as normal confident detections.
+      confident_score_thresh: 0.30
+      # Queries below this floor are treated as too weak/noisy to be useful for
+      # the selection-side latent-query features. So the "latent" band is:
+      #   latent_score_floor <= query score < confident_score_thresh
+      latent_score_floor: 0.05
+      # Used by features such as `geometry_topk_mean`: first score every latent
+      # query in an image, then average only the best `top_k` queries.
+      top_k: 5
+      # Minimum box IoU for treating weak/strong predictions as support for the
+      # same latent hypothesis.
+      cross_view_iou_thresh: 0.30
+    signals:
+      - name: geometry_mean_all
+        weight: 1.0
+
+  train:
+    lr: 0.0001
+    weight_decay: 0.0001
+    lr_scheduler: cosine
+    num_workers: 0
+    # Where to place the mean teacher during fine-tuning:
+    # - `auto`: if a second visible GPU exists, use it for the teacher
+    # - `same`: keep teacher on the same GPU as the student
+    # - `cuda:1`: force a specific device
+    teacher_device: auto
+    log_period: 100
+    eval_period: 372
+    checkpoint_period: 3720
+    # Per-step labeled and unlabeled target batch sizes inside one DAOD round.
+    labeled_batch_size: 1
+    unlabeled_batch_size: 1
+    ema:
+      # - `ema`: standard teacher <- momentum * teacher + (1-momentum) * student
+      # - `aema`: DDT-style adaptive EMA, where high-gradient parameters track
+      #   the student slightly faster than the rest
+      mode: ema
+      # Teacher <- EMA(student) momentum. Larger means slower teacher updates.
+      momentum: 0.999
+      # Used only when mode == `aema`.
+      adaptive_momentum: 0.998
+      # Fraction of parameters treated as high-gradient in adaptive EMA.
+      top_fraction: 0.10
+      # Update teacher once every N optimizer steps.
+      update_interval: 1
+    routing:
+      hard:
+        # DDT-style hard pseudo labels: teacher predictions above `score_min`
+        # are kept, then same-class duplicates are suppressed.
+        score_min: 0.50
+        # After routing on raw query rows, greedily suppress same-class pseudo
+        # boxes with IoU above this threshold before turning them into hard GT.
+        dedup_iou_thresh: 0.70
+      soft:
+        # LPLD-style soft targets: low-confidence teacher hypotheses in this
+        # band are distilled separately, but only if they are not already
+        # covered by hard pseudo labels.
+        score_min: 0.05
+        score_max: 0.50
+        hard_exclusion_iou_max: 0.40
+        # Apply KL only when the best same-class student query overlaps the
+        # teacher soft target by at least this IoU.
+        match_iou_min: 0.30
+        threshold: 0.30
+        signals:
+          - name: logit_sharpness
+            weight: 0.4
+          - name: decoder_box_stability
+            weight: 0.3
+          - name: teacher_student_agreement
+            weight: 0.3
+    losses:
+      hard_pseudo_weight: 1.0
+      soft_distill_weight: 1.0
+
+  eval:
+    num_workers: 0
+    source_val_limit: 0
+    target_val_limit: 0
+    write_tensorboard: false

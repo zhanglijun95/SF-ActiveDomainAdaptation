@@ -1,0 +1,39 @@
+seed: 42
+
+run:
+  root_dir: runs
+
+data:
+  root: /home/ljzhang/data/ins-seg/cityscapes
+  source_root: /home/ljzhang/data/ins-seg/cityscapes
+  target_root: /home/ljzhang/data/ins-seg/bdd100k
+  source_domain: cityscapes
+  target_domain: bdd100k
+  target_timeofday: daytime
+  num_classes: 8
+
+detector:
+  model_name: dino_r50_4scale_12ep
+  checkpoint_name: dino_r50_4scale_12ep_49_2AP.pth
+  source_ckpt: final
+  source_ckpt_path: runs/daod_source/cityscapes__to__foggy_cityscapes/dino_r50_4scale_12ep/model_final.pth
+  min_size_test: 800
+  max_size_test: 1333
+
+train:
+  batch_size: 8
+  num_workers: 0
+  lr: 0.0001
+  weight_decay: 0.0001
+  lr_scheduler: cosine
+  epochs: 2
+  log_period: 100
+  eval_period: 4591
+  checkpoint_period: 4591
+  max_to_keep: 1
+
+eval:
+  batch_size: 4
+  num_workers: 0
+  source_val_limit: 0
+  target_val_limit: 0

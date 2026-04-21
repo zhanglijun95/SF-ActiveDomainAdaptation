@@ -56,7 +56,33 @@ def resolve_daod_method_run_dir(cfg: Any) -> Path:
     return root / "daod_method" / exp_tag / f"{source}__to__{target}" / model_name
 
 
+def resolve_optional_daod_checkpoint_path(path_value: Any, *, which: str = "best") -> Path | None:
+    if path_value is None or not str(path_value).strip():
+        return None
+
+    checkpoint_path = Path(str(path_value))
+    key = str(which).strip().lower()
+    if checkpoint_path.is_dir():
+        if key in {"best", "model_best", "best_ckpt"}:
+            checkpoint_path = checkpoint_path / "model_best.pth"
+        elif key in {"last", "latest", "final", "model_final"}:
+            checkpoint_path = checkpoint_path / "model_final.pth"
+        else:
+            raise ValueError(f"Unsupported DAOD checkpoint selector: {which}. Use one of: best, final")
+
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Explicit DAOD checkpoint not found: {checkpoint_path}")
+    return checkpoint_path
+
+
 def resolve_daod_source_ckpt_path(cfg: Any, which: str = "best") -> Path:
+    override_path = resolve_optional_daod_checkpoint_path(
+        getattr(getattr(cfg, "detector", object()), "source_ckpt_path", None),
+        which=which,
+    )
+    if override_path is not None:
+        return override_path
+
     output_dir = resolve_daod_source_run_dir(cfg)
     key = str(which).strip().lower()
     if key in {"best", "model_best", "best_ckpt"}:

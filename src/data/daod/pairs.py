@@ -10,14 +10,17 @@ from .cityscapes_to_foggy_cityscapes import (
     CITYSCAPES_THING_CLASSES,
     build_dataset as build_cityscapes_to_foggy_cityscapes_dataset,
 )
+from .cityscapes_to_bdd100k import build_dataset as build_cityscapes_to_bdd100k_dataset
 
 
 _PAIR_BUILDERS = {
     ("cityscapes", "foggy_cityscapes"): build_cityscapes_to_foggy_cityscapes_dataset,
+    ("cityscapes", "bdd100k"): build_cityscapes_to_bdd100k_dataset,
 }
 
 _PAIR_THING_CLASSES = {
     ("cityscapes", "foggy_cityscapes"): CITYSCAPES_THING_CLASSES,
+    ("cityscapes", "bdd100k"): CITYSCAPES_THING_CLASSES,
 }
 
 

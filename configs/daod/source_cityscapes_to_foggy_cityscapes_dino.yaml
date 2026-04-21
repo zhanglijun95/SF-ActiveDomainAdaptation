@@ -1,0 +1,35 @@
+seed: 42
+
+run:
+  root_dir: runs
+
+data:
+  root: /home/ljzhang/data/ins-seg/cityscapes
+  source_domain: cityscapes
+  target_domain: foggy_cityscapes
+  foggy_beta: "0.02"
+  num_classes: 8
+
+detector:
+  model_name: dino_r50_4scale_12ep
+  checkpoint_name: dino_r50_4scale_12ep_49_2AP.pth
+  min_size_test: 800
+  max_size_test: 1333
+
+train:
+  batch_size: 8
+  num_workers: 0
+  lr: 0.0001
+  weight_decay: 0.0001
+  lr_scheduler: cosine
+  epochs: 2
+  log_period: 100
+  eval_period: 372
+  checkpoint_period: 372
+  max_to_keep: 1
+
+eval:
+  batch_size: 4
+  num_workers: 0
+  source_val_limit: 0
+  target_val_limit: 0

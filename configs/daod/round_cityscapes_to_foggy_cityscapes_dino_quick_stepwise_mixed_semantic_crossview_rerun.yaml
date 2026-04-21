@@ -1,0 +1,91 @@
+seed: 42
+
+run:
+  root_dir: runs
+
+data:
+  root: /home/ljzhang/data/ins-seg/cityscapes
+  source_domain: cityscapes
+  target_domain: foggy_cityscapes
+  foggy_beta: "0.02"
+  num_classes: 8
+
+detector:
+  model_name: dino_r50_4scale_12ep
+  checkpoint_name: dino_r50_4scale_12ep_49_2AP.pth
+  source_ckpt: final
+  min_size_test: 800
+  max_size_test: 1333
+
+method:
+  exp_name: daod_round_mean_teacher_quick_stepwise_mixed_semantic_crossview_rerun
+  training_scheme: stepwise_injection
+  num_rounds: 2
+  round_epochs: 1
+  budget_total: 0.05
+
+  selection:
+    strategy: score
+    norm: rank
+    batch_size: 16
+    log_period: 50
+    features:
+      confident_score_thresh: 0.40
+      latent_score_floor: 0.10
+      top_k: 10
+      cross_view_iou_thresh: 0.40
+    signals:
+      - name: semantic_ambiguity_topk_mean
+        weight: 0.30
+      - name: semantic_ambiguity_max
+        weight: 0.15
+      - name: cross_view_topk_mean
+        weight: 0.35
+      - name: cross_view_max
+        weight: 0.20
+
+  train:
+    lr: 0.0001
+    weight_decay: 0.0001
+    lr_scheduler: cosine
+    num_workers: 0
+    teacher_device: auto
+    continue_optimizer_across_rounds: true
+    teacher_init_from_student: false
+    use_pseudo_labels: true
+    log_period: 100
+    eval_period: 372
+    checkpoint_period: 3720
+    labeled_batch_size: 1
+    unlabeled_batch_size: 1
+    ema:
+      momentum: 0.999
+      update_interval: 1
+    routing:
+      hard:
+        score_min: 0.50
+        dedup_iou_thresh: 0.70
+      soft:
+        score_min: 0.05
+        score_max: 0.50
+        hard_exclusion_iou_max: 0.40
+        match_iou_min: 0.30
+        threshold: 0.30
+        signals:
+          - name: logit_sharpness
+            weight: 0.4
+          - name: decoder_box_stability
+            weight: 0.3
+          - name: teacher_student_agreement
+            weight: 0.3
+    losses:
+      hard_pseudo_weight: 1.0
+      hard_pseudo_decay: 1.0
+      soft_distill_weight: 1.0
+      soft_distill_decay: 1.0
+
+  eval:
+    num_workers: 0
+    source_val_limit: 0
+    target_val_limit: 0
+    write_tensorboard: false

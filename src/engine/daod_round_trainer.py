@@ -417,6 +417,7 @@ def _build_hard_teacher_rows(
     *,
     hard_score_min: float,
     hard_nms_iou: float,
+    class_score_mins: dict[int, float] | None = None,
 ) -> list[dict[str, Any]]:
     """Build hard pseudo labels in the DDT style: keep/drop by confidence.
 
@@ -429,7 +430,7 @@ def _build_hard_teacher_rows(
     hard_rows = [
         row
         for row in teacher_item["query_rows"]
-        if float(row["score"]) >= hard_score_min
+        if float(row["score"]) >= float(class_score_mins.get(int(row["category_id"]), hard_score_min) if class_score_mins else hard_score_min)
     ]
     return _dedup_hard_rows(hard_rows, iou_thresh=hard_nms_iou)
 
@@ -895,7 +896,10 @@ class DAODMeanTeacherRoundTrainer:
                         loss_sup = sum(loss_dict.values())
                         loss = loss + loss_sup
 
-                    if unlabeled_batch and use_pseudo_labels and not warmup_active:
+                    enable_hard_pseudo = hard_loss_weight > 0.0
+                    enable_soft_pseudo = soft_loss_weight > 0.0
+
+                    if unlabeled_batch and use_pseudo_labels and not warmup_active and (enable_hard_pseudo or enable_soft_pseudo):
                         teacher_items = _teacher_outputs_for_unlabeled(
                             teacher_adapter,
                             unlabeled_batch,
@@ -921,24 +925,28 @@ class DAODMeanTeacherRoundTrainer:
                         for teacher_item, student_item in zip(teacher_items, student_items):
                             if teacher_item["sample"]["sample_id"] != student_item["sample"]["sample_id"]:
                                 raise RuntimeError("Teacher/student unlabeled batch alignment broke.")
-                            hard_rows = _build_hard_teacher_rows(
-                                teacher_item,
-                                hard_score_min=hard_score_min,
-                                hard_nms_iou=hard_nms_iou,
-                            )
-                            soft_targets = _build_soft_teacher_targets(
-                                teacher_item,
-                                student_item,
-                                hard_rows=hard_rows,
-                                soft_score_min=soft_score_min,
-                                soft_score_max=soft_score_max,
-                                soft_specs=soft_specs,
-                                soft_threshold=soft_threshold,
-                                hard_exclusion_iou_max=soft_hard_exclusion_iou_max,
-                            )
+                            hard_rows = []
+                            soft_targets = []
+                            if enable_hard_pseudo or enable_soft_pseudo:
+                                hard_rows = _build_hard_teacher_rows(
+                                    teacher_item,
+                                    hard_score_min=hard_score_min,
+                                    hard_nms_iou=hard_nms_iou,
+                                )
+                            if enable_soft_pseudo:
+                                soft_targets = _build_soft_teacher_targets(
+                                    teacher_item,
+                                    student_item,
+                                    hard_rows=hard_rows,
+                                    soft_score_min=soft_score_min,
+                                    soft_score_max=soft_score_max,
+                                    soft_specs=soft_specs,
+                                    soft_threshold=soft_threshold,
+                                    hard_exclusion_iou_max=soft_hard_exclusion_iou_max,
+                                )
                             hard_pseudo_count += len(hard_rows)
                             soft_target_count += len(soft_targets)
-                            if hard_rows:
+                            if enable_hard_pseudo and hard_rows:
                                 pseudo_annotations = _pseudo_annotations_from_rows(hard_rows)
                                 if pseudo_annotations:
                                     pseudo_sample = dict(teacher_item["sample"])
@@ -954,7 +962,7 @@ class DAODMeanTeacherRoundTrainer:
                                     }
                                 )
 
-                        if hard_batch:
+                        if enable_hard_pseudo and hard_batch:
                             hard_inputs = _make_supervised_inputs(
                                 student_adapter,
                                 hard_batch,
@@ -969,7 +977,7 @@ class DAODMeanTeacherRoundTrainer:
                                 memory_log_path,
                                 _mem_log_payload(self.device, tag="after_hard_loss", epoch=epoch_idx, step=global_step + 1),
                             )
-                        if soft_batch:
+                        if enable_soft_pseudo and soft_batch:
                             loss_soft = _student_soft_loss(
                                 soft_batch,
                                 soft_loss_weight=soft_loss_weight,

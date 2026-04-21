@@ -27,6 +27,7 @@ from src.data.daod.detectron2 import (
 )
 from src.engine.utils import (
     resolve_daod_oracle_run_dir,
+    resolve_optional_daod_checkpoint_path,
     resolve_daod_source_run_dir,
     save_resolved_config,
 )
@@ -112,7 +113,7 @@ def _log_eval_metrics(output_dir: Path, step: int, split_name: str, metrics: dic
         writer.close()
 
 
-def _resolve_eval_checkpoint(output_dir: Path, checkpoint_name: str | None) -> Path:
+def _resolve_eval_checkpoint(cfg: Any, output_dir: Path, checkpoint_name: str | None) -> Path:
     if checkpoint_name is not None:
         checkpoint_path = Path(checkpoint_name)
         if not checkpoint_path.is_absolute():
@@ -120,6 +121,13 @@ def _resolve_eval_checkpoint(output_dir: Path, checkpoint_name: str | None) -> P
         if checkpoint_path.exists():
             return checkpoint_path
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+    override_path = resolve_optional_daod_checkpoint_path(
+        getattr(getattr(cfg, "detector", object()), "source_ckpt_path", None),
+        which=str(getattr(getattr(cfg, "detector", object()), "source_ckpt", "best")),
+    )
+    if override_path is not None:
+        return override_path
 
     for candidate in ("model_best.pth", "model_final.pth"):
         checkpoint_path = output_dir / candidate
@@ -137,7 +145,13 @@ def _resolve_source_init_checkpoint(cfg: Any, checkpoint_name: str | None) -> Pa
         if checkpoint_path.exists():
             return checkpoint_path
         raise FileNotFoundError(f"Oracle init checkpoint not found: {checkpoint_path}")
-    return _resolve_eval_checkpoint(source_output_dir, checkpoint_name=None)
+    override_path = resolve_optional_daod_checkpoint_path(
+        getattr(getattr(cfg, "detector", object()), "source_ckpt_path", None),
+        which=str(getattr(getattr(cfg, "detector", object()), "source_ckpt", "best")),
+    )
+    if override_path is not None:
+        return override_path
+    return _resolve_eval_checkpoint(cfg, source_output_dir, checkpoint_name=None)
 
 
 def _build_eval_splits(cfg: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -161,6 +175,7 @@ def _train_daod(
     output_dir: Path,
     init_checkpoint: str | None,
     best_metric_split: str,
+    resume: bool = False,
 ) -> dict[str, Any]:
     adapter = build_daod_model(cfg, load_weights=init_checkpoint is None)
     model = adapter.model
@@ -192,7 +207,7 @@ def _train_daod(
     trainer_hooks: list[Any] = [hooks.IterationTimer()]
     trainer_hooks.append(hooks.LRScheduler(optimizer=optimizer, scheduler=scheduler))
     checkpoint_period = int(getattr(cfg.train, "checkpoint_period", 0))
-    if checkpoint_period > 0:
+    if checkpoint_period > 0 and comm.is_main_process():
         trainer_hooks.append(
             hooks.PeriodicCheckpointer(
                 checkpointer,
@@ -223,8 +238,16 @@ def _train_daod(
         trainer_hooks.append(hooks.PeriodicWriter(writers, period=int(getattr(cfg.train, "log_period", 20))))
     trainer.register_hooks(trainer_hooks)
 
+    start_iter = 0
+    if resume and checkpointer.has_checkpoint():
+        resume_checkpoint = checkpointer.get_checkpoint_file()
+        checkpointer.resume_or_load(resume_checkpoint, resume=True)
+        start_iter = trainer.iter + 1
+        if comm.is_main_process():
+            print(f"[Resume] Resuming DAOD training from {resume_checkpoint} at iteration {start_iter}.")
+
     model.train()
-    trainer.train(0, max_iter)
+    trainer.train(start_iter, max_iter)
     checkpointer.save("model_final")
 
     model.eval()
@@ -240,24 +263,27 @@ def _train_daod(
         "output_dir": str(output_dir),
         "train_split": train_split,
         "best_metric_split": best_metric_split,
+        "start_iter": start_iter,
         "max_iter": max_iter,
         "source_val_metrics": source_val_metrics,
         "target_val_metrics": target_val_metrics,
         "init_checkpoint": None if init_checkpoint is None else str(init_checkpoint),
+        "resume": resume,
     }
 
 
-def train_daod_source_only(cfg: Any) -> dict[str, Any]:
+def train_daod_source_only(cfg: Any, *, resume: bool = False) -> dict[str, Any]:
     return _train_daod(
         cfg,
         train_split="source_train",
         output_dir=_output_dir(cfg, oracle=False),
         init_checkpoint=None,
         best_metric_split="source_val",
+        resume=resume,
     )
 
 
-def train_daod_oracle(cfg: Any, checkpoint_name: str | None = None) -> dict[str, Any]:
+def train_daod_oracle(cfg: Any, checkpoint_name: str | None = None, *, resume: bool = False) -> dict[str, Any]:
     init_checkpoint = _resolve_source_init_checkpoint(cfg, checkpoint_name)
     return _train_daod(
         cfg,
@@ -265,6 +291,7 @@ def train_daod_oracle(cfg: Any, checkpoint_name: str | None = None) -> dict[str,
         output_dir=_output_dir(cfg, oracle=True),
         init_checkpoint=str(init_checkpoint),
         best_metric_split="target_val",
+        resume=resume,
     )
 
 
@@ -274,7 +301,7 @@ def eval_daod_source_model(cfg: Any, checkpoint_name: str | None = None, *, orac
 
     adapter = build_daod_model(cfg, load_weights=False)
     model = adapter.model
-    checkpoint_path = _resolve_eval_checkpoint(output_dir, checkpoint_name)
+    checkpoint_path = _resolve_eval_checkpoint(cfg, output_dir, checkpoint_name)
     DetectionCheckpointer(model).load(str(checkpoint_path))
     if comm.get_world_size() > 1:
         model = create_ddp_model(model, broadcast_buffers=False)
@@ -303,9 +330,9 @@ def _main_worker(args: argparse.Namespace) -> None:
     if args.eval_only:
         summary = eval_daod_source_model(cfg, checkpoint_name=args.checkpoint, oracle=args.oracle)
     elif args.oracle:
-        summary = train_daod_oracle(cfg, checkpoint_name=args.init_checkpoint)
+        summary = train_daod_oracle(cfg, checkpoint_name=args.init_checkpoint, resume=args.resume)
     else:
-        summary = train_daod_source_only(cfg)
+        summary = train_daod_source_only(cfg, resume=args.resume)
     if not comm.is_main_process():
         return
 
@@ -321,6 +348,7 @@ def main() -> None:
     parser.add_argument("--eval-only", action="store_true")
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--init-checkpoint", default=None)
+    parser.add_argument("--resume", action="store_true")
     parser.add_argument("--num-gpus", type=int, default=torch.cuda.device_count() if torch.cuda.is_available() else 1)
     parser.add_argument("--num-machines", type=int, default=1)
     parser.add_argument("--machine-rank", type=int, default=0)

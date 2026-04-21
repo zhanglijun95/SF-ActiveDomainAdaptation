@@ -63,6 +63,8 @@ class StateTests(unittest.TestCase):
             budget_used=2,
             student_checkpoint="student.pth",
             teacher_checkpoint="teacher.pth",
+            optimizer_checkpoint="optimizer.pt",
+            scheduler_checkpoint="scheduler.pt",
             discriminator_checkpoint="disc.pt",
             teacher_discriminator_checkpoint="teacher_disc.pt",
             initialized=True,
@@ -74,6 +76,7 @@ class StateTests(unittest.TestCase):
         loaded = load_fnp_state(state_path)
         self.assertEqual(loaded.queried_ids, {"a", "b"})
         self.assertTrue(loaded.initialized)
+        self.assertEqual(loaded.optimizer_checkpoint, "optimizer.pt")
 
 
 if __name__ == "__main__":

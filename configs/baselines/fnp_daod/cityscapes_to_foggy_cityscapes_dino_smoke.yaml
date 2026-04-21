@@ -1,0 +1,83 @@
+seed: 42
+
+run:
+  root_dir: runs
+
+data:
+  root: /home/ljzhang/data/ins-seg/cityscapes
+  source_domain: cityscapes
+  target_domain: foggy_cityscapes
+  foggy_beta: "0.02"
+  num_classes: 8
+
+detector:
+  model_name: dino_r50_4scale_12ep
+  checkpoint_name: dino_r50_4scale_12ep_49_2AP.pth
+  source_ckpt: final
+  min_size_test: 800
+  max_size_test: 1333
+
+method:
+  exp_name: fnp_daod_cityscapes_to_foggy_cityscapes_dino_smoke
+  num_rounds: 1
+  round_epochs: 1
+  budget_total: 1
+
+  initial_adaptation:
+    enabled: false
+    epochs: 1
+    use_pseudo_labels: false
+
+  fnpm:
+    hidden_dim: 128
+    num_layers: 2
+    dropout: 0.1
+    lr: 0.0001
+    weight_decay: 0.0001
+    batch_size: 4
+    epochs: 1
+    num_workers: 0
+    target_cap: 10.0
+    match_iou_thresh: 0.5
+    max_source_samples: 4
+    max_labeled_target_samples: 4
+
+  acquisition:
+    mc_dropout_passes: 2
+    mc_dropout_passes_train: 2
+    dropout_rate: 0.1
+    score_floor: 0.05
+    max_queries: 64
+    max_target_samples: 4
+
+  discriminator:
+    hidden_dim: 128
+    num_layers: 2
+    dropout: 0.1
+
+  pseudo:
+    score_floor: 0.05
+    score_min: 0.3
+    loc_var_max: 0.1
+    dedup_iou_thresh: 0.7
+
+  train:
+    lr: 0.0001
+    weight_decay: 0.0001
+    num_workers: 0
+    teacher_device: same
+    source_batch_size: 1
+    labeled_batch_size: 1
+    unlabeled_batch_size: 1
+    ema_momentum: 0.999
+    lambda_adv: 0.01
+    grl_lambda: 1.0
+    pseudo_weight: 1.0
+    use_pseudo_labels: true
+    max_steps_per_epoch: 1
+    max_source_samples: 4
+    max_target_samples: 4
+
+  eval:
+    source_val_limit: 1
+    target_val_limit: 1

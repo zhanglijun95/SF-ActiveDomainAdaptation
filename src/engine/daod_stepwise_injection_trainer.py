@@ -46,6 +46,7 @@ from src.engine.daod_round_trainer import (
     _update_ema,
     _accumulate_grad_importance,
 )
+from src.engine.daod_pseudo_recalibration import compute_pseudo_recalibration
 from src.engine.utils import save_json
 from src.methods.daod_method import DAODRoundPlan, DAODRoundState
 from src.models import build_daod_model
@@ -186,6 +187,8 @@ class DAODStepwiseInjectionTrainer:
 
         hard_routing_cfg = getattr(routing_cfg, "hard", object())
         soft_routing_cfg = getattr(routing_cfg, "soft", object())
+        pseudo_recalibration_cfg = getattr(method_train_cfg, "pseudo_recalibration", object())
+        pseudo_recalibration_enabled = bool(getattr(pseudo_recalibration_cfg, "enabled", False))
         soft_specs = _signal_specs(
             soft_routing_cfg,
             default_specs=[
@@ -225,6 +228,23 @@ class DAODStepwiseInjectionTrainer:
         injection_points = _injection_points(total_steps, len(budget_schedule))
         labeled_ids = set(state_in.queried_ids).union(initial_plan.queried_ids)
         queried_ids = set(labeled_ids)
+        num_classes = int(getattr(cfg.data, "num_classes", 0))
+        cfg_seed = int(getattr(cfg, "seed", 42))
+        hard_class_score_mins: dict[int, float] | None = None
+        hard_class_counts: list[int] = []
+        hard_recalibration_stats: dict[str, Any] = {}
+        if pseudo_recalibration_enabled:
+            hard_class_score_mins, hard_recalibration_stats = compute_pseudo_recalibration(
+                target_train_dicts,
+                labeled_ids,
+                num_classes=num_classes,
+                base_score_min=hard_score_min,
+                recalibration_cfg=pseudo_recalibration_cfg,
+                teacher_adapter=teacher_adapter,
+                stage_idx=0,
+                seed=cfg_seed,
+            )
+            hard_class_counts = list(hard_recalibration_stats.get("class_counts", []))
 
         save_json(
             run_dir / "injection_0_plan.json",
@@ -241,6 +261,9 @@ class DAODStepwiseInjectionTrainer:
                 "global_step": int(getattr(state_in, "global_step", 0)),
                 "selected_count": len(initial_plan.queried_ids),
                 "total_labeled": len(labeled_ids),
+                "hard_pseudo_class_counts": hard_class_counts if pseudo_recalibration_enabled else None,
+                "hard_pseudo_class_score_mins": hard_class_score_mins if pseudo_recalibration_enabled else None,
+                "hard_pseudo_recalibration": hard_recalibration_stats if pseudo_recalibration_enabled else None,
             },
         )
 
@@ -261,6 +284,7 @@ class DAODStepwiseInjectionTrainer:
 
         def maybe_inject() -> None:
             nonlocal current_stage, labeled_ids, queried_ids, labeled_loader, unlabeled_loader, labeled_iter, unlabeled_iter
+            nonlocal hard_class_score_mins, hard_class_counts, hard_recalibration_stats
             if current_stage >= len(remaining_budgets):
                 return
             if global_step < injection_points[current_stage]:
@@ -290,6 +314,18 @@ class DAODStepwiseInjectionTrainer:
             )
             labeled_ids = set(labeled_ids).union(plan.queried_ids)
             queried_ids = set(queried_ids).union(plan.queried_ids)
+            if pseudo_recalibration_enabled:
+                hard_class_score_mins, hard_recalibration_stats = compute_pseudo_recalibration(
+                    target_train_dicts,
+                    labeled_ids,
+                    num_classes=num_classes,
+                    base_score_min=hard_score_min,
+                    recalibration_cfg=pseudo_recalibration_cfg,
+                    teacher_adapter=teacher_adapter,
+                    stage_idx=current_stage + 1,
+                    seed=cfg_seed,
+                )
+                hard_class_counts = list(hard_recalibration_stats.get("class_counts", []))
             labeled_loader, unlabeled_loader, labeled_iter, unlabeled_iter, _, _ = _build_stage_loaders(
                 target_train_dicts,
                 labeled_ids,
@@ -304,6 +340,9 @@ class DAODStepwiseInjectionTrainer:
                     "global_step": int(global_step),
                     "selected_count": len(plan.queried_ids),
                     "total_labeled": len(labeled_ids),
+                    "hard_pseudo_class_counts": hard_class_counts if pseudo_recalibration_enabled else None,
+                    "hard_pseudo_class_score_mins": hard_class_score_mins if pseudo_recalibration_enabled else None,
+                    "hard_pseudo_recalibration": hard_recalibration_stats if pseudo_recalibration_enabled else None,
                 },
             )
             current_stage += 1
@@ -338,7 +377,10 @@ class DAODStepwiseInjectionTrainer:
                     loss_sup = sum(loss_dict.values())
                     loss = loss + loss_sup
 
-                if unlabeled_batch and use_pseudo_labels:
+                enable_hard_pseudo = hard_loss_weight > 0.0
+                enable_soft_pseudo = soft_loss_weight > 0.0
+
+                if unlabeled_batch and use_pseudo_labels and (enable_hard_pseudo or enable_soft_pseudo):
                     teacher_items = _teacher_outputs_for_unlabeled(
                         teacher_adapter,
                         unlabeled_batch,
@@ -354,24 +396,29 @@ class DAODStepwiseInjectionTrainer:
                     hard_batch = []
                     soft_batch = []
                     for teacher_item, student_item in zip(teacher_items, student_items):
-                        hard_rows = _build_hard_teacher_rows(
-                            teacher_item,
-                            hard_score_min=hard_score_min,
-                            hard_nms_iou=hard_nms_iou,
-                        )
-                        soft_targets = _build_soft_teacher_targets(
-                            teacher_item,
-                            student_item,
-                            hard_rows=hard_rows,
-                            soft_score_min=soft_score_min,
-                            soft_score_max=soft_score_max,
-                            soft_specs=soft_specs,
-                            soft_threshold=soft_threshold,
-                            hard_exclusion_iou_max=soft_hard_exclusion_iou_max,
-                        )
+                        hard_rows = []
+                        soft_targets = []
+                        if enable_hard_pseudo or enable_soft_pseudo:
+                            hard_rows = _build_hard_teacher_rows(
+                                teacher_item,
+                                hard_score_min=hard_score_min,
+                                hard_nms_iou=hard_nms_iou,
+                                class_score_mins=hard_class_score_mins,
+                            )
+                        if enable_soft_pseudo:
+                            soft_targets = _build_soft_teacher_targets(
+                                teacher_item,
+                                student_item,
+                                hard_rows=hard_rows,
+                                soft_score_min=soft_score_min,
+                                soft_score_max=soft_score_max,
+                                soft_specs=soft_specs,
+                                soft_threshold=soft_threshold,
+                                hard_exclusion_iou_max=soft_hard_exclusion_iou_max,
+                            )
                         hard_pseudo_count += len(hard_rows)
                         soft_target_count += len(soft_targets)
-                        if hard_rows:
+                        if enable_hard_pseudo and hard_rows:
                             pseudo_annotations = _pseudo_annotations_from_rows(hard_rows)
                             if pseudo_annotations:
                                 pseudo_sample = dict(teacher_item["sample"])
@@ -387,7 +434,7 @@ class DAODStepwiseInjectionTrainer:
                                 }
                             )
 
-                    if hard_batch:
+                    if enable_hard_pseudo and hard_batch:
                         hard_inputs = _make_supervised_inputs(
                             student_adapter,
                             hard_batch,
@@ -399,7 +446,7 @@ class DAODStepwiseInjectionTrainer:
                         loss_hard = hard_loss_weight * sum(hard_loss_dict.values())
                         loss = loss + loss_hard
                         _append_jsonl(memory_log_path, _mem_log_payload(self.device, tag="after_hard_loss", epoch=1, step=global_step + 1))
-                    if soft_batch:
+                    if enable_soft_pseudo and soft_batch:
                         loss_soft = _student_soft_loss(
                             soft_batch,
                             soft_loss_weight=soft_loss_weight,
@@ -454,6 +501,8 @@ class DAODStepwiseInjectionTrainer:
                             "num_hard_pseudo_boxes": int(hard_pseudo_count),
                             "num_soft_targets": int(soft_target_count),
                             "current_stage": int(current_stage),
+                            "pseudo_recalibration_enabled": bool(pseudo_recalibration_enabled),
+                            "pseudo_recalibration_method": hard_recalibration_stats.get("method") if pseudo_recalibration_enabled else None,
                         },
                     )
 

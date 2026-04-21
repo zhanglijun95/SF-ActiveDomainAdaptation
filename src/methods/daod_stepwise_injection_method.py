@@ -9,6 +9,7 @@ from src.engine.daod_stepwise_injection_trainer import DAODStepwiseInjectionTrai
 from src.engine.utils import save_json
 from src.methods.daod_method import (
     DAODRoundMethod,
+    DAODRoundPlan,
     DAODRoundState,
     _compute_round_budgets,
     _resolve_budget_total,

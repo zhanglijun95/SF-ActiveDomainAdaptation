@@ -103,6 +103,15 @@ def _build_sample_id(view_name: str, city: str, stem: str, foggy_beta: str | Non
     return f"{view_name}:{city}:{stem}:beta={foggy_beta}"
 
 
+def resolve_daod_split_root(cfg: Any, split: SplitName) -> Path:
+    spec = VIEW_SPECS[split]
+    root_attr = "source_root" if str(spec["domain"]) == "source" else "target_root"
+    root_value = getattr(getattr(cfg, "data", object()), root_attr, None)
+    if root_value is not None and str(root_value).strip():
+        return Path(str(root_value))
+    return Path(str(cfg.data.root))
+
+
 class DAODCityscapesDataset(Dataset):
     """Single-view detection dataset compatible with existing wrappers."""
 
@@ -185,7 +194,7 @@ def build_dataset(
     transform: Callable[[Image.Image], Any] | None,
 ) -> DAODCityscapesDataset:
     return DAODCityscapesDataset(
-        root=cfg.data.root,
+        root=resolve_daod_split_root(cfg, split),
         split=split,
         transform=transform,
         foggy_beta=str(getattr(cfg.data, "foggy_beta", "0.02")),

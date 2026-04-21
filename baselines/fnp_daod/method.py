@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from pathlib import Path
 import shutil
+from types import SimpleNamespace
 from typing import Any
 
 from detectron2.checkpoint import DetectionCheckpointer
@@ -19,7 +20,7 @@ from .dino_hooks import extract_pooled_backbone_features, mc_dropout_query_stati
 from .fnpm import FalseNegativePredictionModule, fit_fnpm, normalize_fn_count
 from .metrics import count_false_negatives
 from .state import FNPDAODState, FNPRoundPlan, FNPSamplePlan, save_fnp_state
-from .utils import save_json, save_resolved_config
+from .utils import maybe_empty_cuda_cache, resolve_aux_device, save_json, save_resolved_config
 
 
 def _resolve_budget_total(cfg: Any, total_target: int) -> int:
@@ -53,6 +54,7 @@ class FNPDAODMethod:
     ) -> None:
         self.cfg = cfg
         self.device = device
+        self.selection_device = resolve_aux_device(cfg, device)
         self.run_dir = resolve_fnp_daod_run_dir(cfg)
         if source_train is None:
             source_dataset = build_daod_dataset(cfg, split="source_train", transform=None)
@@ -85,6 +87,8 @@ class FNPDAODMethod:
             budget_used=0,
             student_checkpoint=str(source_ckpt),
             teacher_checkpoint=str(source_ckpt),
+            optimizer_checkpoint=None,
+            scheduler_checkpoint=None,
             discriminator_checkpoint=None,
             teacher_discriminator_checkpoint=None,
             initialized=False,
@@ -97,7 +101,7 @@ class FNPDAODMethod:
         max_source_samples = int(getattr(fnpm_cfg, "max_source_samples", 0))
         max_target_samples = int(getattr(fnpm_cfg, "max_labeled_target_samples", 0))
 
-        teacher_adapter = build_daod_model(self.cfg, load_weights=False, device=self.device)
+        teacher_adapter = build_daod_model(self.cfg, load_weights=False, device=self.selection_device)
         DetectionCheckpointer(teacher_adapter.model).load(str(state.teacher_checkpoint))
         teacher_adapter.model.eval()
 
@@ -153,7 +157,10 @@ class FNPDAODMethod:
             num_layers=int(getattr(fnpm_cfg, "num_layers", 3)),
             dropout=float(getattr(fnpm_cfg, "dropout", 0.1)),
         )
-        history = fit_fnpm(model, features=features, targets=targets, cfg=self.cfg, device=self.device)
+        history = fit_fnpm(model, features=features, targets=targets, cfg=self.cfg, device=torch.device("cpu"))
+        model.to(torch.device("cpu"))
+        del teacher_adapter
+        maybe_empty_cuda_cache()
         fnpm_ckpt_path = round_dir / "fnpm.pt"
         torch.save(model.state_dict(), fnpm_ckpt_path)
         summary = {
@@ -165,6 +172,21 @@ class FNPDAODMethod:
         save_json(round_dir / "fnpm_summary.json", summary)
         return model, summary
 
+    def _train_domain_discriminator(self, *, state: FNPDAODState, round_dir: Path) -> tuple[Any, dict[str, Any]]:
+        unlabeled_target = [sample for sample in self.target_train if sample["sample_id"] not in state.queried_ids]
+        print(
+            "[FNP-DAOD][domain-disc] "
+            f"round={state.round_idx} "
+            f"source_samples={len(self.source_train)} "
+            f"target_samples={len(unlabeled_target)}"
+        )
+        return self.trainer.train_domain_discriminator(
+            teacher_checkpoint=str(state.teacher_checkpoint),
+            run_dir=round_dir,
+            source_samples=self.source_train,
+            target_samples=unlabeled_target,
+        )
+
     def plan_round(self, *, state: FNPDAODState, budget_k: int) -> FNPRoundPlan:
         round_dir = self.run_dir / f"round_{state.round_idx}"
         round_dir.mkdir(parents=True, exist_ok=True)
@@ -175,26 +197,11 @@ class FNPDAODMethod:
             f"labeled_target={len(state.queried_ids)}"
         )
         fnpm_model, fnpm_summary = self._train_fnpm(state=state, round_dir=round_dir)
+        domain_discriminator, domain_summary = self._train_domain_discriminator(state=state, round_dir=round_dir)
 
-        teacher_adapter = build_daod_model(self.cfg, load_weights=False, device=self.device)
+        teacher_adapter = build_daod_model(self.cfg, load_weights=False, device=self.selection_device)
         DetectionCheckpointer(teacher_adapter.model).load(str(state.teacher_checkpoint))
         teacher_adapter.model.eval()
-
-        teacher_discriminator = None
-        if state.teacher_discriminator_checkpoint:
-            from .trainer import DomainDiscriminator
-
-            pooled_probe = extract_pooled_backbone_features(teacher_adapter, self.target_train[:1], with_grad=False)
-            teacher_discriminator = DomainDiscriminator(
-                input_dim=int(pooled_probe.shape[-1]),
-                hidden_dim=int(getattr(self.cfg.method.discriminator, "hidden_dim", 256)),
-                num_layers=int(getattr(self.cfg.method.discriminator, "num_layers", 3)),
-                dropout=float(getattr(self.cfg.method.discriminator, "dropout", 0.1)),
-            ).to(self.device)
-            teacher_discriminator.load_state_dict(
-                torch.load(state.teacher_discriminator_checkpoint, map_location=self.device)
-            )
-            teacher_discriminator.eval()
 
         unlabeled_candidates = [sample for sample in self.target_train if sample["sample_id"] not in state.queried_ids]
         max_target_samples = int(getattr(self.cfg.method.acquisition, "max_target_samples", 0))
@@ -202,10 +209,9 @@ class FNPDAODMethod:
             unlabeled_candidates = unlabeled_candidates[:max_target_samples]
 
         records = []
-        fnpm_model.to(self.device)
         fnpm_model.eval()
         for sample in unlabeled_candidates:
-            pooled = extract_pooled_backbone_features(teacher_adapter, sample, with_grad=False)[0].to(self.device)
+            pooled = extract_pooled_backbone_features(teacher_adapter, sample, with_grad=False)[0]
             fn_score = float(fnpm_model(pooled.unsqueeze(0)).detach().cpu().item())
             mc_stats = mc_dropout_query_statistics(
                 teacher_adapter,
@@ -215,13 +221,10 @@ class FNPDAODMethod:
                 score_floor=float(getattr(self.cfg.method.acquisition, "score_floor", 0.05)),
                 max_queries=int(getattr(self.cfg.method.acquisition, "max_queries", 300)),
             )
-            if teacher_discriminator is None:
-                div_score = 1.0
-            else:
-                with torch.no_grad():
-                    logit = teacher_discriminator(pooled.unsqueeze(0)).squeeze(0)
-                    prob_target = float(torch.sigmoid(logit).detach().cpu().item())
-                    div_score = float((1.0 - prob_target) / max(prob_target, 1e-6))
+            with torch.no_grad():
+                logit = domain_discriminator(pooled.unsqueeze(0).cpu()).squeeze(0)
+                prob_target = float(torch.sigmoid(logit).detach().cpu().item())
+                div_score = float((1.0 - prob_target) / max(prob_target, 1e-6))
             records.append(
                 {
                     "sample_id": sample["sample_id"],
@@ -253,10 +256,13 @@ class FNPDAODMethod:
                 "budget_k": int(budget_k),
                 "num_candidates": len(unlabeled_candidates),
                 "fnpm": fnpm_summary,
+                "domain_discriminator": domain_summary,
                 "queried_ids": queried_ids,
                 "sample_plans": [asdict(plan) for plan in sample_plans],
             },
         )
+        del teacher_adapter
+        maybe_empty_cuda_cache()
         print(
             "[FNP-DAOD][select] "
             f"round={state.round_idx} "
@@ -275,34 +281,13 @@ class FNPDAODMethod:
             state.initialized = True
             return state
 
-        init_dir = self.run_dir / "initial_adaptation"
         print(
             "[FNP-DAOD][init] "
-            f"epochs={int(getattr(init_cfg, 'epochs', 1))} "
-            f"source_ckpt={state.student_checkpoint}"
+            "skipped extra initial adaptation and reusing the source-trained checkpoint directly"
         )
-        summary = self.trainer.fit_stage(
-            run_dir=init_dir,
-            state_in=state,
-            labeled_target_ids=set(),
-            stage_name="initial_adaptation",
-            max_epochs=int(getattr(init_cfg, "epochs", 1)),
-            use_pseudo_labels=bool(getattr(init_cfg, "use_pseudo_labels", False)),
-        )
-        state_out = FNPDAODState(
-            round_idx=0,
-            queried_ids=set(state.queried_ids),
-            budget_total=state.budget_total,
-            budget_used=state.budget_used,
-            student_checkpoint=str(summary["student_checkpoint"]),
-            teacher_checkpoint=str(summary["teacher_checkpoint"]),
-            discriminator_checkpoint=str(summary["discriminator_checkpoint"]),
-            teacher_discriminator_checkpoint=str(summary["teacher_discriminator_checkpoint"]),
-            initialized=True,
-            global_step=int(summary["global_step"]),
-        )
-        save_fnp_state(self.run_dir / "state_last.json", state_out)
-        return state_out
+        state.initialized = True
+        save_fnp_state(self.run_dir / "state_last.json", state)
+        return state
 
     def run_round(self, *, state: FNPDAODState, budget_k: int) -> FNPDAODState:
         print(
@@ -322,13 +307,14 @@ class FNPDAODMethod:
         )
 
         labeled_target_ids = set(state.queried_ids).union(plan.queried_ids)
-        summary = self.trainer.fit_stage(
+        backend_plan = SimpleNamespace(
+            round_idx=state.round_idx,
+            queried_ids=list(plan.queried_ids),
+        )
+        summary = self.trainer.fit_round(
             run_dir=round_dir / "train",
             state_in=state,
-            labeled_target_ids=labeled_target_ids,
-            stage_name=f"round_{state.round_idx}",
-            max_epochs=int(getattr(self.cfg.method, "round_epochs", 1)),
-            use_pseudo_labels=bool(getattr(self.cfg.method.train, "use_pseudo_labels", True)),
+            plan=backend_plan,
         )
         state_out = FNPDAODState(
             round_idx=state.round_idx + 1,
@@ -337,8 +323,10 @@ class FNPDAODMethod:
             budget_used=state.budget_used + len(plan.queried_ids),
             student_checkpoint=str(summary["student_checkpoint"]),
             teacher_checkpoint=str(summary["teacher_checkpoint"]),
-            discriminator_checkpoint=str(summary["discriminator_checkpoint"]),
-            teacher_discriminator_checkpoint=str(summary["teacher_discriminator_checkpoint"]),
+            optimizer_checkpoint=summary.get("optimizer_checkpoint"),
+            scheduler_checkpoint=summary.get("scheduler_checkpoint"),
+            discriminator_checkpoint=None,
+            teacher_discriminator_checkpoint=None,
             initialized=True,
             global_step=int(summary["global_step"]),
         )

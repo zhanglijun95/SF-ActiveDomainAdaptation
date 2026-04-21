@@ -31,6 +31,8 @@ class FNPDAODState:
     budget_used: int
     student_checkpoint: str
     teacher_checkpoint: str
+    optimizer_checkpoint: str | None = None
+    scheduler_checkpoint: str | None = None
     discriminator_checkpoint: str | None = None
     teacher_discriminator_checkpoint: str | None = None
     initialized: bool = False
