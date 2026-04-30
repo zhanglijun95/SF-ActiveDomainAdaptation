@@ -19,7 +19,7 @@ from typing import Any, Iterable
 
 from torch.utils.data import Dataset
 
-from .transforms import make_strong_view, make_weak_view
+from .transforms import make_seeded_strong_view, make_strong_view, make_weak_view
 
 
 class DAODListDataset(Dataset):
@@ -90,6 +90,7 @@ def build_weak_view_sample(
 def build_strong_view_sample(
     sample: dict[str, Any],
     *,
+    rng: random.Random | None = None,
     suffix: str = "strong",
 ) -> dict[str, Any]:
     """Clone one sample with the DAOD strong view attached in-memory."""
@@ -99,5 +100,8 @@ def build_strong_view_sample(
         from PIL import Image
 
         image = Image.open(sample["file_name"]).convert("RGB")
-    strong_image, strong_meta = make_strong_view(image.copy())
+    if rng is None:
+        strong_image, strong_meta = make_strong_view(image.copy())
+    else:
+        strong_image, strong_meta = make_seeded_strong_view(image.copy(), rng=rng)
     return _clone_sample_with_view(sample, image=strong_image, suffix=suffix, view_meta=strong_meta)

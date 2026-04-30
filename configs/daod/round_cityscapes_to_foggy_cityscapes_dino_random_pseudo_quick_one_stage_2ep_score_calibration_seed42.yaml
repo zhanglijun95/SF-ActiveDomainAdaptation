@@ -1,0 +1,117 @@
+seed: 42
+
+run:
+  root_dir: runs
+
+data:
+  root: /home/ljzhang/data/ins-seg/cityscapes
+  source_domain: cityscapes
+  target_domain: foggy_cityscapes
+  foggy_beta: "0.02"
+  num_classes: 8
+
+detector:
+  model_name: dino_r50_4scale_12ep
+  checkpoint_name: dino_r50_4scale_12ep_49_2AP.pth
+  source_ckpt: final
+  min_size_test: 800
+  max_size_test: 1333
+
+method:
+  exp_name: daod_round_random_with_pseudo_quick_one_stage_2ep_score_calibration_seed42
+  training_scheme: stepwise_injection
+  num_rounds: 1
+  round_epochs: 2
+  budget_total: 0.05
+
+  selection:
+    strategy: random
+    norm: rank
+    batch_size: 16
+    log_period: 50
+    features:
+      confident_score_thresh: 0.30
+      latent_score_floor: 0.05
+      top_k: 5
+      cross_view_iou_thresh: 0.30
+    signals:
+      - name: geometry_mean_all
+        weight: 1.0
+
+  train:
+    lr: 0.0001
+    weight_decay: 0.0001
+    lr_scheduler: cosine
+    num_workers: 0
+    teacher_device: auto
+    continue_optimizer_across_rounds: true
+    teacher_init_from_student: false
+    use_pseudo_labels: true
+    log_period: 100
+    eval_period: 372
+    checkpoint_period: 3720
+    labeled_batch_size: 1
+    unlabeled_batch_size: 1
+    grad_accum_steps: 2
+    clip_max_norm: 0.5
+    stability:
+      seed_everything: true
+      deterministic: true
+      deterministic_warn_only: true
+    pseudo_cache:
+      enabled: false
+      batch_size: 1
+      disable_soft: false
+    pseudo_score_calibration:
+      enabled: true
+      method: score_calibration
+      calibration_max_images: 0
+      candidate_score_floor: 0.01
+      gt_iou_thresh: 0.50
+      holdout_ratio: 0.20
+      min_examples: 128
+      min_positives: 8
+      min_negatives: 8
+      use_class_bias: true
+      min_class_examples: 16
+      class_bias_shrinkage: 32.0
+      slope_reg: 0.01
+      bias_reg: 0.01
+      min_slope: 0.25
+      max_slope: 4.0
+      max_abs_bias: 2.0
+      max_abs_class_bias: 1.0
+      min_output_score: 0.01
+      max_output_score: 0.99
+      fallback_to_identity_on_worse_val: true
+    ema:
+      momentum: 0.999
+      update_interval: 1
+    routing:
+      hard:
+        score_min: 0.50
+        dedup_iou_thresh: 0.70
+      soft:
+        score_min: 0.05
+        score_max: 0.50
+        hard_exclusion_iou_max: 0.40
+        match_iou_min: 0.30
+        threshold: 0.30
+        signals:
+          - name: logit_sharpness
+            weight: 0.4
+          - name: decoder_box_stability
+            weight: 0.3
+          - name: teacher_student_agreement
+            weight: 0.3
+    losses:
+      hard_pseudo_weight: 1.0
+      hard_pseudo_decay: 1.0
+      soft_distill_weight: 1.0
+      soft_distill_decay: 1.0
+
+  eval:
+    num_workers: 0
+    source_val_limit: 0
+    target_val_limit: 0
+    write_tensorboard: false

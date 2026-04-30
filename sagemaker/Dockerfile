@@ -51,6 +51,7 @@ RUN python -c "import detectron2; print(f'detectron2={detectron2.__version__}')"
 # Copy project code
 ENV WORKDIR=/opt/ml/code
 COPY src/ ${WORKDIR}/src/
+COPY baselines/ ${WORKDIR}/baselines/
 COPY configs/ ${WORKDIR}/configs/
 COPY sagemaker/sagemaker_entry.py ${WORKDIR}/sagemaker_entry.py
 COPY sagemaker/s3_sync.py ${WORKDIR}/s3_sync.py

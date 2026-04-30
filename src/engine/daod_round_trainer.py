@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import random
 from typing import Any
 
 from detectron2.checkpoint import DetectionCheckpointer
@@ -279,10 +280,11 @@ def _make_supervised_inputs(
     strong_short_edge: int,
     max_size: int,
     device: torch.device,
+    strong_view_rng: random.Random | None = None,
 ) -> list[dict[str, Any]]:
     inputs: list[dict[str, Any]] = []
     for sample in batch:
-        strong_sample = build_strong_view_sample(sample, suffix="supervised_strong")
+        strong_sample = build_strong_view_sample(sample, rng=strong_view_rng, suffix="supervised_strong")
         image = strong_sample["image"]
         boxes = [ann["bbox"] for ann in sample["annotations"]]
         image, boxes, new_h, new_w = _resize_pil_and_boxes(image, boxes, strong_short_edge, max_size)
@@ -346,6 +348,7 @@ def _student_outputs_for_unlabeled(
     *,
     strong_short_edge: int,
     max_size: int,
+    strong_view_rng: random.Random | None = None,
 ) -> list[dict[str, Any]]:
     """Run student strong-view inference for unlabeled samples once per step.
 
@@ -355,7 +358,7 @@ def _student_outputs_for_unlabeled(
 
     outputs: list[dict[str, Any]] = []
     for sample in batch:
-        strong_sample = build_strong_view_sample(sample, suffix="student_strong")
+        strong_sample = build_strong_view_sample(sample, rng=strong_view_rng, suffix="student_strong")
         resized_image, _, new_h, new_w = _resize_pil_and_boxes(strong_sample["image"], [], strong_short_edge, max_size)
         student_input_sample = dict(sample)
         student_input_sample["image"] = resized_image

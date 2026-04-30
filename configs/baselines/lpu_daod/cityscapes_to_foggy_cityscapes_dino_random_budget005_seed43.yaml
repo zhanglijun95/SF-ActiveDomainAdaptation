@@ -1,0 +1,68 @@
+seed: 43
+
+run:
+  root_dir: runs
+
+data:
+  root: /home/ljzhang/data/ins-seg/cityscapes
+  source_domain: cityscapes
+  target_domain: foggy_cityscapes
+  foggy_beta: "0.02"
+  num_classes: 8
+
+detector:
+  model_name: dino_r50_4scale_12ep
+  checkpoint_name: dino_r50_4scale_12ep_49_2AP.pth
+  source_ckpt: final
+  min_size_test: 800
+  max_size_test: 1333
+
+method:
+  exp_name: lpu_daod_cityscapes_to_foggy_cityscapes_dino_random_budget005_seed43
+  epochs: 2
+
+  train:
+    lr: 0.0001
+    weight_decay: 0.0001
+    batch_size: 1
+    num_workers: 0
+    teacher_device: auto
+    log_period: 100
+    checkpoint_period: 0
+    clip_max_norm: 0.5
+    max_target_samples: 0
+    max_steps_per_epoch: 0
+
+  active:
+    enabled: true
+    strategy: random
+    budget_total: 0.05
+    supervised_weight: 1.0
+
+  pseudo:
+    threshold: 0.4
+    weight: 1.0
+    dedup_iou_thresh: 0.7
+
+  lpu:
+    low_score_min: 0.05
+    high_score_min: 0.4
+    routing_threshold: 0.0
+    hard_exclusion_iou_max: 0.5
+    pre_routing_topk: 256
+    max_low_targets_per_image: 128
+    match_iou_min: 0.3
+    pst_weight: 1.0
+    lscl_weight: 0.1
+    positive_iou: 0.5
+    negative_iou: 0.1
+    contrastive_margin: 0.2
+
+  ema:
+    momentum: 0.999
+    update_interval: 1
+
+  eval:
+    target_val_limit: 0
+    evaluate_teacher: false
+    final_model: student

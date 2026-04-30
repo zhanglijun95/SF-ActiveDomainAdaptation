@@ -15,6 +15,12 @@ from src.engine.daod_pseudo_recalibration import (
     _selected_fbeta,
     compute_pseudo_recalibration,
 )
+from src.engine.daod_pseudo_score_calibration import (
+    apply_pseudo_score_calibrator_to_rows,
+    apply_pseudo_score_calibrator_to_thresholds,
+    fit_pseudo_score_calibrator_from_examples,
+    pseudo_reliability_weight_for_rows,
+)
 from src.engine.daod_stepwise_injection_trainer import _injection_points
 from src.methods.daod_method import DAODRoundState
 from src.methods.daod_stepwise_injection_method import DAODStepwiseInjectionMethod
@@ -258,6 +264,143 @@ class DAODStepwiseTests(unittest.TestCase):
         )
         self.assertLess(thresholds[0], 0.5)
         self.assertEqual(stats["gt_counts"][0], 1)
+
+    def test_score_calibration_learns_class_specific_bias(self):
+        examples = []
+        for idx in range(12):
+            sample_id = f"s{idx}"
+            examples.extend(
+                [
+                    {"sample_id": sample_id, "category_id": 0, "score": 0.92, "label": 1},
+                    {"sample_id": sample_id, "category_id": 0, "score": 0.18, "label": 0},
+                    {"sample_id": sample_id, "category_id": 1, "score": 0.82, "label": 0},
+                    {"sample_id": sample_id, "category_id": 1, "score": 0.46, "label": 1},
+                ]
+            )
+
+        calibrator, stats = fit_pseudo_score_calibrator_from_examples(
+            examples,
+            num_classes=2,
+            calibration_cfg=_to_attr(
+                {
+                    "method": "score_calibration",
+                    "holdout_ratio": 0.25,
+                    "min_examples": 16,
+                    "min_positives": 4,
+                    "min_negatives": 4,
+                    "use_class_bias": True,
+                    "min_class_examples": 8,
+                    "class_bias_shrinkage": 1.0,
+                    "fallback_to_identity_on_worse_val": False,
+                }
+            ),
+            seed=7,
+        )
+        self.assertEqual(calibrator.method, "platt_class_bias")
+        self.assertLess(calibrator.class_biases[1], 0.0)
+        self.assertFalse(stats["fallback_to_identity"])
+
+        calibrated_rows = apply_pseudo_score_calibrator_to_rows(
+            [
+                {"bbox": [0, 0, 1, 1], "category_id": 0, "score": 0.82},
+                {"bbox": [0, 0, 1, 1], "category_id": 1, "score": 0.82},
+            ],
+            calibrator,
+        )
+        self.assertIn("raw_score", calibrated_rows[0])
+        self.assertGreater(calibrated_rows[0]["score"], calibrated_rows[1]["score"])
+        self.assertLess(calibrated_rows[1]["score"], 0.82)
+
+        weighted_only_rows = apply_pseudo_score_calibrator_to_rows(
+            [{"bbox": [0, 0, 1, 1], "category_id": 1, "score": 0.82}],
+            calibrator,
+            replace_score=False,
+        )
+        self.assertAlmostEqual(weighted_only_rows[0]["score"], 0.82)
+        self.assertLess(weighted_only_rows[0]["calibrated_score"], 0.82)
+
+    def test_score_calibration_falls_back_to_identity_when_data_is_too_small(self):
+        examples = [
+            {"sample_id": "a", "category_id": 0, "score": 0.9, "label": 1},
+            {"sample_id": "a", "category_id": 0, "score": 0.2, "label": 0},
+            {"sample_id": "b", "category_id": 1, "score": 0.7, "label": 1},
+            {"sample_id": "b", "category_id": 1, "score": 0.3, "label": 0},
+        ]
+        calibrator, stats = fit_pseudo_score_calibrator_from_examples(
+            examples,
+            num_classes=2,
+            calibration_cfg=_to_attr(
+                {
+                    "method": "score_calibration",
+                    "min_examples": 32,
+                    "min_positives": 4,
+                    "min_negatives": 4,
+                }
+            ),
+            seed=11,
+        )
+        self.assertEqual(calibrator.method, "identity")
+        self.assertTrue(stats["fallback_to_identity"])
+        self.assertIn("not_enough_examples", stats["fallback_reason"])
+
+    def test_score_calibration_maps_thresholds_in_calibrated_space(self):
+        examples = []
+        for idx in range(12):
+            sample_id = f"s{idx}"
+            examples.extend(
+                [
+                    {"sample_id": sample_id, "category_id": 0, "score": 0.92, "label": 1},
+                    {"sample_id": sample_id, "category_id": 0, "score": 0.18, "label": 0},
+                    {"sample_id": sample_id, "category_id": 1, "score": 0.82, "label": 0},
+                    {"sample_id": sample_id, "category_id": 1, "score": 0.46, "label": 1},
+                ]
+            )
+        calibrator, _ = fit_pseudo_score_calibrator_from_examples(
+            examples,
+            num_classes=2,
+            calibration_cfg=_to_attr(
+                {
+                    "method": "score_calibration",
+                    "holdout_ratio": 0.25,
+                    "min_examples": 16,
+                    "min_positives": 4,
+                    "min_negatives": 4,
+                    "use_class_bias": True,
+                    "min_class_examples": 8,
+                    "class_bias_shrinkage": 1.0,
+                    "fallback_to_identity_on_worse_val": False,
+                }
+            ),
+            seed=13,
+        )
+        mapped = apply_pseudo_score_calibrator_to_thresholds([0.4, 0.4], calibrator)
+        self.assertLess(mapped[1], mapped[0])
+        self.assertNotAlmostEqual(mapped[0], 0.4)
+        self.assertGreaterEqual(mapped[0], 0.0)
+        self.assertLessEqual(mapped[0], 1.0)
+
+    def test_pseudo_reliability_weight_uses_calibrated_score_and_threshold_margin(self):
+        weight, stats = pseudo_reliability_weight_for_rows(
+            [
+                {"category_id": 0, "score": 0.55, "calibrated_score": 0.70},
+                {"category_id": 1, "score": 0.90, "calibrated_score": 0.50},
+            ],
+            _to_attr(
+                {
+                    "score_key": "calibrated_score",
+                    "min_weight": 0.2,
+                    "max_weight": 1.0,
+                    "power": 1.0,
+                    "aggregation": "mean",
+                    "relative_to_threshold": True,
+                }
+            ),
+            thresholds=[0.50, 0.40],
+        )
+
+        self.assertAlmostEqual(weight, 0.4266666667)
+        self.assertEqual(stats["num_rows"], 2)
+        self.assertEqual(stats["score_key"], "calibrated_score")
 
     def test_selected_fbeta_raises_threshold_to_remove_false_positive(self):
         teacher_items = [

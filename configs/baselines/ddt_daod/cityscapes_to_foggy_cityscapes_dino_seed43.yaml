@@ -56,3 +56,4 @@ method:
   eval:
     source_val_limit: 0
     target_val_limit: 0
+    evaluate_teacher: true

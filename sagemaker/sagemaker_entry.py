@@ -68,17 +68,35 @@ def _link_source_checkpoint(cfg_path: str):
 def main():
     patched_cfg = _patch_config(CONFIG_REL)
     _link_source_checkpoint(patched_cfg)
+    run_root = os.path.join(SM_MODEL_DIR, "runs")
 
     # Start background S3 sync for intermediate results
     if S3_SYNC_URI:
         from s3_sync import start_s3_sync
-        run_root = os.path.join(SM_MODEL_DIR, "runs")
         start_s3_sync(run_root, S3_SYNC_URI, interval_minutes=S3_SYNC_INTERVAL)
 
     sys.argv = ["sagemaker_entry", "--config", patched_cfg]
 
-    from src.methods.daod_run_rounds import main as run_main
-    run_main()
+    if CONFIG_REL.startswith("configs/baselines/ddt_daod/"):
+        from baselines.ddt_daod.run import main as run_main
+    elif CONFIG_REL.startswith("configs/baselines/lpld_daod/"):
+        from baselines.lpld_daod.run import main as run_main
+    elif CONFIG_REL.startswith("configs/baselines/pets_daod/"):
+        from baselines.pets_daod.run import main as run_main
+    elif CONFIG_REL.startswith("configs/baselines/lpu_daod/"):
+        from baselines.lpu_daod.run import main as run_main
+    else:
+        from src.methods.daod_run_rounds import main as run_main
+
+    try:
+        run_main()
+    finally:
+        if S3_SYNC_URI:
+            try:
+                from s3_sync import sync_to_s3_once
+                sync_to_s3_once(run_root, S3_SYNC_URI)
+            except Exception as exc:
+                print(f"[SM] final S3 sync failed: {exc}")
 
 
 if __name__ == "__main__":

@@ -131,8 +131,7 @@ def main():
     else:
         image_uri = _build_and_push_image(account, region)
 
-    config_tag = Path(args.config).stem.replace("round_cityscapes_to_foggy_cityscapes_dino_", "").replace("_", "-")[:40]
-    job_name = f"sfada-{config_tag}-{int(time.time())}-{random.randint(0, 999):03d}"
+    job_name = f"sfada-{int(time.time())}-{random.randint(0, 999):03d}"
 
     estimator = Estimator(
         image_uri=image_uri,

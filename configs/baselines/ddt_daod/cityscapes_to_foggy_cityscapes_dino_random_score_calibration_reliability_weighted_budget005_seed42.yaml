@@ -1,0 +1,108 @@
+seed: 42
+
+run:
+  root_dir: runs
+
+data:
+  root: /home/ljzhang/data/ins-seg/cityscapes
+  source_domain: cityscapes
+  target_domain: foggy_cityscapes
+  foggy_beta: "0.02"
+  num_classes: 8
+
+detector:
+  model_name: dino_r50_4scale_12ep
+  checkpoint_name: dino_r50_4scale_12ep_49_2AP.pth
+  source_ckpt: final
+  min_size_test: 800
+  max_size_test: 1333
+
+method:
+  exp_name: ddt_daod_cityscapes_to_foggy_cityscapes_dino_random_score_calibration_reliability_weighted_budget005_seed42
+  epochs: 2
+
+  train:
+    lr: 0.0001
+    weight_decay: 0.0001
+    batch_size: 1
+    num_workers: 0
+    teacher_device: auto
+    log_period: 100
+    checkpoint_period: 0
+    clip_max_norm: 0.5
+    max_target_samples: 0
+
+  active:
+    enabled: true
+    strategy: random
+    budget_total: 0.05
+    supervised_weight: 1.0
+
+  pseudo:
+    threshold: 0.4
+    dynamic: true
+    alpha_dt: 0.5
+    gamma_dt: 0.9
+    min_dt: 0.25
+    max_dt: 0.45
+    dedup_iou_thresh: 0.7
+
+  pseudo_recalibration:
+    enabled: false
+    method: label_rarity
+    min_score_min: 0.30
+    max_delta: 0.10
+    smoothing: 1.0
+
+  pseudo_score_calibration:
+    enabled: true
+    method: score_calibration
+    calibration_max_images: 0
+    candidate_score_floor: 0.01
+    gt_iou_thresh: 0.50
+    holdout_ratio: 0.20
+    min_examples: 128
+    min_positives: 8
+    min_negatives: 8
+    use_class_bias: true
+    min_class_examples: 16
+    class_bias_shrinkage: 32.0
+    slope_reg: 0.01
+    bias_reg: 0.01
+    min_slope: 0.25
+    max_slope: 4.0
+    max_abs_bias: 2.0
+    max_abs_class_bias: 1.0
+    min_output_score: 0.01
+    max_output_score: 0.99
+    fallback_to_identity_on_worse_val: true
+    replace_score: false
+    map_thresholds: false
+    dynamic_update_space: raw
+
+  pseudo_reliability_weighting:
+    enabled: true
+    score_key: calibrated_score
+    fallback_score_key: score
+    min_weight: 0.25
+    max_weight: 1.0
+    power: 1.0
+    aggregation: mean
+    relative_to_threshold: false
+
+  masking:
+    block_size: 64
+    masked_ratio: 0.5
+    coef_masked_img: 1.0
+
+  aema:
+    alpha_ema: 0.9996
+    alpha_aema: 0.997
+    top_fraction: 0.1
+    update_interval: 2
+    use_teacher_grad_importance: true
+
+  eval:
+    source_val_limit: 0
+    target_val_limit: 0
+    evaluate_teacher: true

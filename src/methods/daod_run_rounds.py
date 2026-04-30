@@ -9,6 +9,7 @@ import shutil
 import torch
 
 from src.config import load_config
+from src.engine.utils import seed_everything
 from src.methods.daod_method import DAODRoundMethod, build_default_daod_round_state
 from src.methods.daod_stepwise_injection_method import (
     DAODStepwiseInjectionMethod,
@@ -36,6 +37,14 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    train_cfg = getattr(getattr(cfg, "method", object()), "train", object())
+    stability_cfg = getattr(train_cfg, "stability", object())
+    if bool(getattr(stability_cfg, "seed_everything", True)):
+        seed_everything(
+            int(getattr(cfg, "seed", 42)),
+            deterministic=bool(getattr(stability_cfg, "deterministic", False)),
+            warn_only=bool(getattr(stability_cfg, "deterministic_warn_only", True)),
+        )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[DAOD] config={args.config} device={device}")
 

@@ -89,6 +89,37 @@ def make_strong_view(image: Image.Image) -> tuple[Image.Image, dict[str, Any]]:
     return build_strong_view_transform()(image), {"hflip": False, "width": int(image.width)}
 
 
+def make_seeded_strong_view(
+    image: Image.Image,
+    *,
+    rng: random.Random,
+) -> tuple[Image.Image, dict[str, Any]]:
+    """Create the strong view with an explicit Python RNG."""
+
+    transforms_to_apply = [
+        ("brightness", rng.uniform(0.6, 1.4)),
+        ("contrast", rng.uniform(0.6, 1.4)),
+        ("saturation", rng.uniform(0.6, 1.4)),
+        ("hue", rng.uniform(-0.1, 0.1)),
+    ]
+    rng.shuffle(transforms_to_apply)
+    for name, value in transforms_to_apply:
+        if name == "brightness":
+            image = F.adjust_brightness(image, value)
+        elif name == "contrast":
+            image = F.adjust_contrast(image, value)
+        elif name == "saturation":
+            image = F.adjust_saturation(image, value)
+        elif name == "hue":
+            image = F.adjust_hue(image, value)
+
+    if rng.random() < 0.2:
+        image = F.rgb_to_grayscale(image, num_output_channels=3)
+    sigma = rng.uniform(0.1, 2.0)
+    image = F.gaussian_blur(image, kernel_size=[5, 5], sigma=[sigma, sigma])
+    return image, {"hflip": False, "width": int(image.width)}
+
+
 def map_boxes_to_original_view(
     boxes_xyxy: list[list[float]],
     view_meta: dict[str, Any],
