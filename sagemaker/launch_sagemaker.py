@@ -12,6 +12,8 @@ Env vars you can override:
 """
 
 import argparse
+import hashlib
+import re
 import subprocess
 import sys
 import time
@@ -20,6 +22,7 @@ from pathlib import Path
 
 import boto3
 import sagemaker
+from botocore.exceptions import ClientError
 from sagemaker.estimator import Estimator
 
 
@@ -36,6 +39,92 @@ from sagemaker.estimator import Estimator
 REPO_ROOT = "/home/ljzhang/code/SFADA"
 ECR_REPO_NAME = "sfada-daod"
 IMAGE_TAG = "latest"
+
+
+def _job_part(value: str) -> str:
+    part = re.sub(r"[^a-z0-9-]+", "-", str(value).lower().replace("_", "-")).strip("-")
+    return part or "job"
+
+
+def _job_slug(config_path: str) -> str:
+    stem = Path(config_path).stem.lower()
+    known_patterns = (
+        "query_revival_multiview",
+        "query_revival_scorer",
+        "query_recovery_multiview",
+        "query_recovery_scorer",
+        "oracle_filter_recover",
+        "oracle_classwise",
+        "oracle_filter",
+        "oracle_recover",
+        "soft_query",
+    )
+    for pattern in known_patterns:
+        if pattern in stem:
+            return pattern.replace("_", "-")
+    slug = re.sub(r"[^a-z0-9-]+", "-", stem.replace("_", "-")).strip("-")
+    return slug[:32].strip("-") or "job"
+
+
+def _make_job_name(
+    config_path: str,
+    *,
+    job_name_token: str = "",
+    now_ns: int | None = None,
+    rand: int | None = None,
+) -> str:
+    config_hash = hashlib.sha1(config_path.encode("utf-8")).hexdigest()[:8]
+    token = _job_part(job_name_token)[:24] if job_name_token else config_hash
+    now = time.time_ns() if now_ns is None else int(now_ns)
+    rand_value = random.randint(0, 99999) if rand is None else int(rand)
+    suffix = f"{token}-{config_hash}-{now}-{rand_value:05d}"
+    job_prefix = f"sfada-{_job_slug(config_path)}"
+    max_prefix_len = max(1, 63 - len(suffix) - 1)
+    return f"{job_prefix[:max_prefix_len].rstrip('-')}-{suffix}"
+
+
+def _is_create_training_job_throttle(exc: ClientError) -> bool:
+    error = exc.response.get("Error", {})
+    code = str(error.get("Code", ""))
+    message = str(error.get("Message", ""))
+    throttle_codes = {
+        "ThrottlingException",
+        "TooManyRequestsException",
+        "RequestLimitExceeded",
+        "ThrottledException",
+    }
+    return code in throttle_codes or (
+        "Rate exceeded" in message and "CreateTrainingJob" in str(exc)
+    )
+
+
+def _fit_with_create_retry(
+    estimator: Estimator,
+    inputs: dict[str, str],
+    *,
+    job_name: str,
+    max_attempts: int,
+    base_delay: float,
+    max_delay: float,
+) -> None:
+    """Retry SageMaker control-plane throttling while preserving blocking fit."""
+
+    for attempt in range(1, int(max_attempts) + 1):
+        try:
+            estimator.fit(inputs, job_name=job_name)
+            return
+        except ClientError as exc:
+            if attempt >= int(max_attempts) or not _is_create_training_job_throttle(exc):
+                raise
+            delay = min(float(max_delay), float(base_delay) * (2 ** (attempt - 1)))
+            delay = random.uniform(delay * 0.5, delay * 1.5)
+            print(
+                "[sagemaker-launch][retry] "
+                f"CreateTrainingJob throttled for {job_name}; "
+                f"attempt={attempt}/{max_attempts}, sleeping {delay:.1f}s",
+                flush=True,
+            )
+            time.sleep(delay)
 
 
 def _get_account_and_region():
@@ -97,6 +186,14 @@ def main():
         help="S3 URI of the dataset.",
     )
     parser.add_argument(
+        "--s3-target-data",
+        default=None,
+        help=(
+            "Optional second dataset channel for cross-dataset DAOD configs. "
+            "For Cityscapes->BDD100K, pass the BDD100K S3 root here."
+        ),
+    )
+    parser.add_argument(
         "--s3-output",
         default="s3://lijun-domainadaptation-sagemaker/sagemaker-output/",
         help="S3 URI for training output artifacts.",
@@ -106,8 +203,53 @@ def main():
         default=None,
         help="S3 URI of the pre-trained source checkpoint directory.",
     )
+    parser.add_argument(
+        "--s3-init-ckpt",
+        default=None,
+        help=(
+            "Optional S3 URI for the detector initialization checkpoint used by "
+            "source training, e.g. a detrex model-zoo .pth file or directory."
+        ),
+    )
     parser.add_argument("--skip-build", action="store_true",
                         help="Skip Docker build/push (reuse existing ECR image).")
+    parser.add_argument(
+        "--job-name-token",
+        default="",
+        help="Optional unique token included in the SageMaker job name. "
+             "Generated batch files pass the registry ID here.",
+    )
+    parser.add_argument(
+        "--job-scoped-sync",
+        action="store_true",
+        help=(
+            "Upload periodic intermediate files under intermediate/<job_name>/. "
+            "By default, keep the historical layout under intermediate/baselines/."
+        ),
+    )
+    parser.add_argument(
+        "--oracle",
+        action="store_true",
+        help="Run configs/daod/* with the DAOD oracle target-finetuning entrypoint.",
+    )
+    parser.add_argument(
+        "--create-retries",
+        type=int,
+        default=12,
+        help="Retry count for SageMaker CreateTrainingJob throttling.",
+    )
+    parser.add_argument(
+        "--create-retry-base-delay",
+        type=float,
+        default=20.0,
+        help="Initial retry delay in seconds for CreateTrainingJob throttling.",
+    )
+    parser.add_argument(
+        "--create-retry-max-delay",
+        type=float,
+        default=300.0,
+        help="Maximum retry delay in seconds for CreateTrainingJob throttling.",
+    )
     args = parser.parse_args()
 
     import os
@@ -131,7 +273,12 @@ def main():
     else:
         image_uri = _build_and_push_image(account, region)
 
-    job_name = f"sfada-{int(time.time())}-{random.randint(0, 999):03d}"
+    job_name = _make_job_name(args.config, job_name_token=args.job_name_token)
+
+    if args.job_scoped_sync:
+        s3_sync_uri = f"{args.s3_output.rstrip('/')}/intermediate/{job_name}/"
+    else:
+        s3_sync_uri = f"{args.s3_output.rstrip('/')}/intermediate/"
 
     estimator = Estimator(
         image_uri=image_uri,
@@ -141,11 +288,14 @@ def main():
         output_path=args.s3_output,
         hyperparameters={
             "config": args.config,
-            "s3_sync_uri": f"{args.s3_output.rstrip('/')}/intermediate/",
+            "s3_sync_uri": s3_sync_uri,
             "s3_sync_interval": "30",
+            "oracle": "1" if args.oracle else "0",
         },
         environment={
             "NCCL_DEBUG": "INFO",
+            "PYTHONFAULTHANDLER": "1",
+            "PYTHONUNBUFFERED": "1",
         },
         max_run=3600 * 24 * 7,
         sagemaker_session=sagemaker.Session(boto_session=boto3.Session(region_name=region)),
@@ -159,10 +309,21 @@ def main():
     print(f"  output:   {args.s3_output}")
 
     inputs = {"data": args.s3_data}
+    if args.s3_target_data:
+        inputs["target_data"] = args.s3_target_data
     if args.s3_source_ckpt:
         inputs["source_ckpt"] = args.s3_source_ckpt
+    if args.s3_init_ckpt:
+        inputs["init_ckpt"] = args.s3_init_ckpt
 
-    estimator.fit(inputs, job_name=job_name)
+    _fit_with_create_retry(
+        estimator,
+        inputs,
+        job_name=job_name,
+        max_attempts=max(1, int(args.create_retries)),
+        base_delay=max(1.0, float(args.create_retry_base_delay)),
+        max_delay=max(1.0, float(args.create_retry_max_delay)),
+    )
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ import unittest
 from types import SimpleNamespace
 
 from baselines.sfod_common.active import build_sparse_target_split, resolve_budget_count
+from baselines.sfod_common.trainer import _student_eval_patience_update
 
 
 class SFODSparseLabelSplitTests(unittest.TestCase):
@@ -59,6 +60,36 @@ class SFODSparseLabelSplitTests(unittest.TestCase):
         self.assertEqual(resolve_budget_count(3, 100), 3)
 
 
+class SFODIntermediateEvalEarlyStopTests(unittest.TestCase):
+    def test_consecutive_drop_stops_after_three_student_ap50_drops(self):
+        previous_ap50 = None
+        best_ap50 = None
+        no_improve_count = 0
+        drop_count = 0
+        stopped = False
+
+        for ap50 in [32.0, 34.0, 33.5, 33.0, 32.5]:
+            update = _student_eval_patience_update(
+                ap50=ap50,
+                previous_ap50=previous_ap50,
+                best_ap50=best_ap50,
+                no_improve_count=no_improve_count,
+                consecutive_drop_count=drop_count,
+                min_delta=0.0,
+                mode="consecutive_drop",
+                patience=3,
+            )
+            if update["improved"]:
+                best_ap50 = ap50
+            previous_ap50 = update["previous_ap50"]
+            no_improve_count = update["no_improve_count"]
+            drop_count = update["consecutive_drop_count"]
+            stopped = update["should_stop"]
+
+        self.assertTrue(stopped)
+        self.assertEqual(drop_count, 3)
+        self.assertAlmostEqual(best_ap50, 34.0)
+
+
 if __name__ == "__main__":
     unittest.main()
-

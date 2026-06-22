@@ -21,28 +21,28 @@ def _sync_to_s3(local_dir: str, s3_bucket: str, s3_prefix: str):
             s3.upload_file(str(f), s3_bucket, key)
             count += 1
         except Exception as e:
-            print(f"[S3 sync] failed to upload {f}: {e}")
+            print(f"[S3 sync] failed to upload {f}: {e}", flush=True)
     return count
 
 
 def sync_to_s3_once(local_dir: str, s3_uri: str) -> int:
     """Synchronize ``local_dir`` to ``s3_uri`` immediately."""
     if not s3_uri.startswith("s3://"):
-        print(f"[S3 sync] invalid s3_uri: {s3_uri}, skipping")
+        print(f"[S3 sync] invalid s3_uri: {s3_uri}, skipping", flush=True)
         return 0
 
     parts = s3_uri.replace("s3://", "").split("/", 1)
     bucket = parts[0]
     prefix = parts[1].rstrip("/") if len(parts) > 1 else ""
     count = _sync_to_s3(local_dir, bucket, prefix)
-    print(f"[S3 sync] uploaded {count} files from {local_dir} to {s3_uri}")
+    print(f"[S3 sync] uploaded {count} files from {local_dir} to {s3_uri}", flush=True)
     return count
 
 
 def start_s3_sync(local_dir: str, s3_uri: str, interval_minutes: int = 30):
     """Start a daemon thread that syncs local_dir to s3_uri every interval_minutes."""
     if not s3_uri.startswith("s3://"):
-        print(f"[S3 sync] invalid s3_uri: {s3_uri}, skipping")
+        print(f"[S3 sync] invalid s3_uri: {s3_uri}, skipping", flush=True)
         return
 
     parts = s3_uri.replace("s3://", "").split("/", 1)
@@ -55,8 +55,8 @@ def start_s3_sync(local_dir: str, s3_uri: str, interval_minutes: int = 30):
             try:
                 sync_to_s3_once(local_dir, s3_uri)
             except Exception as e:
-                print(f"[S3 sync] error: {e}")
+                print(f"[S3 sync] error: {e}", flush=True)
 
     t = threading.Thread(target=_loop, daemon=True)
     t.start()
-    print(f"[S3 sync] started: {local_dir} -> {s3_uri} every {interval_minutes}min")
+    print(f"[S3 sync] started: {local_dir} -> {s3_uri} every {interval_minutes}min", flush=True)

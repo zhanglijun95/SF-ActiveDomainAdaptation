@@ -1,7 +1,9 @@
 """Gradient surgery utilities for sparse human-label DAOD.
 
-The trusted target-label gradient is treated as the anchor.  Auxiliary gradients
-from pseudo-label objectives are only changed when they point against that anchor.
+The trusted target-label gradient is treated as the anchor. Auxiliary gradients
+from pseudo-label objectives are changed only when they point against that
+anchor. This restores the historical target-anchored PCGrad/CAGrad/L2RW trial
+family as reusable utilities.
 """
 
 from __future__ import annotations
@@ -60,11 +62,7 @@ def target_anchored_pcgrad(
     aux_grads: GradList,
     eps: float = 1e-12,
 ) -> tuple[GradList, PCGradStats]:
-    """Project an auxiliary gradient away from a trusted anchor on conflict.
-
-    If ``dot(aux, anchor) < 0``, remove the component of ``aux`` that lies along
-    ``anchor``.  The anchor gradient is never modified.
-    """
+    """Project an auxiliary gradient away from a trusted anchor on conflict."""
 
     cosine_before = _cosine(aux_grads, anchor_grads, eps=eps)
     dot = _dot(aux_grads, anchor_grads)
@@ -104,8 +102,54 @@ def target_anchored_pcgrad(
     )
 
 
-def _zero_like(reference: torch.Tensor) -> torch.Tensor:
-    return torch.zeros_like(reference)
+def scale_grad_list(grads: GradList, weight: float | torch.Tensor) -> GradList:
+    """Scale a gradient list while preserving ``None`` entries."""
+
+    return [None if grad is None else grad * weight for grad in grads]
+
+
+def target_anchored_l2rw(
+    *,
+    anchor_grads: GradList,
+    aux_grads: GradList,
+    min_weight: float = 0.25,
+    max_weight: float = 1.0,
+    eps: float = 1e-12,
+) -> tuple[GradList, PCGradStats]:
+    """First-order target-anchored pseudo-gradient reweighting."""
+
+    if min_weight < 0.0 or max_weight < min_weight:
+        raise ValueError("Require 0 <= min_weight <= max_weight for target_anchored_l2rw.")
+
+    cosine_before = _cosine(aux_grads, anchor_grads, eps=eps)
+    if cosine_before is None:
+        weight = float(max_weight)
+    else:
+        alignment = max(0.0, min(1.0, float(cosine_before)))
+        weight = float(min_weight) + (float(max_weight) - float(min_weight)) * alignment
+    weighted_grads = scale_grad_list(aux_grads, weight)
+    return weighted_grads, PCGradStats(
+        cosine_before=cosine_before,
+        cosine_after=_cosine(weighted_grads, anchor_grads, eps=eps),
+        projected=abs(weight - 1.0) > 1e-12,
+        weight=weight,
+    )
+
+
+def combine_grad_lists(*grad_lists: GradList) -> GradList:
+    """Sum gradient lists while preserving ``None`` for fully unused params."""
+
+    if not grad_lists:
+        return []
+    combined: GradList = []
+    for grads_for_param in zip(*grad_lists):
+        total: torch.Tensor | None = None
+        for grad in grads_for_param:
+            if grad is None:
+                continue
+            total = grad.detach().clone() if total is None else total + grad.detach()
+        combined.append(total)
+    return combined
 
 
 def _first_tensor(*grad_lists: GradList) -> torch.Tensor | None:
@@ -136,52 +180,13 @@ def _weighted_sum_grad_lists(
             if grad is None:
                 if total is None:
                     continue
-                value = _zero_like(total)
+                value = torch.zeros_like(total)
             else:
                 value = grad
             weighted = value * weight
             total = weighted if total is None else total + weighted
         combined.append(total)
     return combined
-
-
-def scale_grad_list(grads: GradList, weight: float | torch.Tensor) -> GradList:
-    """Scale a gradient list while preserving ``None`` entries."""
-
-    return [None if grad is None else grad * weight for grad in grads]
-
-
-def target_anchored_l2rw(
-    *,
-    anchor_grads: GradList,
-    aux_grads: GradList,
-    min_weight: float = 0.25,
-    max_weight: float = 1.0,
-    eps: float = 1e-12,
-) -> tuple[GradList, PCGradStats]:
-    """First-order target-anchored pseudo-example reweighting.
-
-    The sparse target gradient is treated as the meta/validation signal.  A
-    pseudo gradient receives high weight when it aligns with that signal and is
-    downweighted when its first-order meta-gradient is conflicting.
-    """
-
-    if min_weight < 0.0 or max_weight < min_weight:
-        raise ValueError("Require 0 <= min_weight <= max_weight for target_anchored_l2rw.")
-
-    cosine_before = _cosine(aux_grads, anchor_grads, eps=eps)
-    if cosine_before is None:
-        weight = float(max_weight)
-    else:
-        alignment = max(0.0, min(1.0, float(cosine_before)))
-        weight = float(min_weight) + (float(max_weight) - float(min_weight)) * alignment
-    weighted_grads = scale_grad_list(aux_grads, weight)
-    return weighted_grads, PCGradStats(
-        cosine_before=cosine_before,
-        cosine_after=_cosine(weighted_grads, anchor_grads, eps=eps),
-        projected=abs(weight - 1.0) > 1e-12,
-        weight=weight,
-    )
 
 
 def _cagrad_objective(
@@ -217,8 +222,6 @@ def _minimize_cagrad_weight(
     eps: float,
     iterations: int = 32,
 ) -> float:
-    """Solve the two-task CAGrad simplex problem by bounded golden search."""
-
     left = 0.0
     right = 1.0
     inv_phi = (5.0**0.5 - 1.0) / 2.0
@@ -272,24 +275,30 @@ def _minimize_cagrad_weight(
                 eps=eps,
             )
     candidates = [
-        (0.0, _cagrad_objective(
-            anchor_norm=anchor_norm,
-            aux_norm=aux_norm,
-            dot=dot,
-            g0_norm=g0_norm,
-            c=c,
-            anchor_weight=0.0,
-            eps=eps,
-        )),
-        (1.0, _cagrad_objective(
-            anchor_norm=anchor_norm,
-            aux_norm=aux_norm,
-            dot=dot,
-            g0_norm=g0_norm,
-            c=c,
-            anchor_weight=1.0,
-            eps=eps,
-        )),
+        (
+            0.0,
+            _cagrad_objective(
+                anchor_norm=anchor_norm,
+                aux_norm=aux_norm,
+                dot=dot,
+                g0_norm=g0_norm,
+                c=c,
+                anchor_weight=0.0,
+                eps=eps,
+            ),
+        ),
+        (
+            1.0,
+            _cagrad_objective(
+                anchor_norm=anchor_norm,
+                aux_norm=aux_norm,
+                dot=dot,
+                g0_norm=g0_norm,
+                c=c,
+                anchor_weight=1.0,
+                eps=eps,
+            ),
+        ),
         ((left + right) / 2.0, min(f1, f2)),
     ]
     return float(min(candidates, key=lambda item: item[1])[0])
@@ -304,11 +313,7 @@ def target_anchored_cagrad(
     sum_scale: bool = True,
     eps: float = 1e-12,
 ) -> tuple[GradList, PCGradStats]:
-    """Two-task CAGrad for sparse target supervision and pseudo loss.
-
-    Returns a combined anchor+pseudo gradient.  ``sum_scale=True`` keeps the
-    magnitude comparable to the usual ``anchor + pseudo`` loss sum.
-    """
+    """Two-task CAGrad for sparse target supervision and pseudo loss."""
 
     cosine_before = _cosine(aux_grads, anchor_grads, eps=eps)
     dot_tensor = _dot(anchor_grads, aux_grads)
@@ -372,22 +377,6 @@ def target_anchored_cagrad(
         projected=True,
         weight=float(aux_weight),
     )
-
-
-def combine_grad_lists(*grad_lists: GradList) -> GradList:
-    """Sum gradient lists while preserving ``None`` for fully unused params."""
-
-    if not grad_lists:
-        return []
-    combined: GradList = []
-    for grads_for_param in zip(*grad_lists):
-        total: torch.Tensor | None = None
-        for grad in grads_for_param:
-            if grad is None:
-                continue
-            total = grad.detach().clone() if total is None else total + grad.detach()
-        combined.append(total)
-    return combined
 
 
 def clone_grad_list(grads: GradList) -> GradList:

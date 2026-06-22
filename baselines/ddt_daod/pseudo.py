@@ -22,6 +22,8 @@ def xyxy_iou(box_a: list[float], box_b: list[float]) -> float:
 
 
 def deduplicate_rows(rows: list[dict[str, Any]], *, iou_thresh: float) -> list[dict[str, Any]]:
+    if float(iou_thresh) > 1.0:
+        return list(rows)
     kept: list[dict[str, Any]] = []
     for row in sorted(rows, key=lambda item: float(item.get("score", 0.0)), reverse=True):
         suppress = False
@@ -79,10 +81,22 @@ def update_dynamic_thresholds(
     gamma_dt: float,
     max_dt: float,
     min_dt: float,
+    empty_policy: str = "keep",
 ) -> list[float]:
+    empty_policy = str(empty_policy).strip().lower()
+    if empty_policy not in {"keep", "official"}:
+        raise ValueError(f"Unsupported dynamic-threshold empty_policy={empty_policy!r}")
     updated = []
     for threshold, score_sum, count in zip(thresholds, score_sums, score_counts):
-        mean_score = float(score_sum) / max(int(count), 1)
+        if int(count) <= 0:
+            if empty_policy == "keep":
+                # No class evidence this epoch: keep the previous threshold
+                # instead of making the class easier purely because it was absent.
+                updated.append(float(threshold))
+                continue
+            mean_score = 0.0
+        else:
+            mean_score = float(score_sum) / max(int(count), 1)
         candidate = float(gamma_dt) * float(threshold) + (1.0 - float(gamma_dt)) * float(alpha_dt) * np.sqrt(max(mean_score, 0.0))
         updated.append(float(max(min(candidate, float(max_dt)), float(min_dt))))
     return updated

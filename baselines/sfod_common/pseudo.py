@@ -41,14 +41,28 @@ def deduplicate_rows(rows: list[dict[str, Any]], *, iou_thresh: float) -> list[d
 def filter_pseudo_rows(
     query_rows: list[dict[str, Any]],
     *,
-    threshold: float,
+    threshold: float | None = None,
+    thresholds: list[float] | None = None,
     dedup_iou_thresh: float,
 ) -> list[dict[str, Any]]:
-    filtered = [
-        dict(row)
-        for row in query_rows
-        if int(row.get("category_id", -1)) >= 0 and float(row.get("score", 0.0)) >= float(threshold)
-    ]
+    if thresholds is None:
+        if threshold is None:
+            raise ValueError("filter_pseudo_rows requires either threshold or thresholds")
+        thresholds = []
+
+    filtered = []
+    for row in query_rows:
+        class_id = int(row.get("category_id", -1))
+        if class_id < 0:
+            continue
+        if thresholds:
+            if class_id >= len(thresholds):
+                continue
+            threshold_value = float(thresholds[class_id])
+        else:
+            threshold_value = float(threshold)
+        if float(row.get("score", 0.0)) >= threshold_value:
+            filtered.append(dict(row))
     return deduplicate_rows(filtered, iou_thresh=dedup_iou_thresh)
 
 

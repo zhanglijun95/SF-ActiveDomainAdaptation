@@ -75,6 +75,11 @@ def _get_checkpoint_path(detector_cfg: Any, model_name: str) -> Path:
         checkpoint_name = str(detector_cfg.init_checkpoint)
     else:
         checkpoint_name = str(getattr(detector_cfg, "checkpoint_name", f"{model_name}.pth"))
+    explicit_path = Path(checkpoint_name)
+    if explicit_path.is_absolute() or explicit_path.parent != Path("."):
+        if explicit_path.exists():
+            return explicit_path
+        raise FileNotFoundError(f"Missing explicit detrex checkpoint: {explicit_path}")
     checkpoint_path = _CKPT_ROOT / checkpoint_name
     if checkpoint_path.exists():
         return checkpoint_path
@@ -347,6 +352,139 @@ def _run_dino_raw_outputs(
     return raw_outputs
 
 
+def _maybe_detach_tensor(tensor: torch.Tensor, *, detach_to_cpu: bool) -> torch.Tensor:
+    return tensor.detach().cpu() if detach_to_cpu else tensor
+
+
+def _run_deta_raw_outputs(
+    adapter: DetrexAdapter,
+    inputs: list[dict[str, Any]],
+    *,
+    detach_to_cpu: bool,
+) -> list[dict[str, Any]]:
+    """Run the local detrex DETA model and keep raw decoder outputs.
+
+    DETA shares the Deformable-DETR-style output contract with DINO, but its
+    transformer call does not accept DINO's two-entry `attn_masks` list. Keeping
+    this path separate prevents DINO-specific assumptions from leaking into the
+    second-detector validation experiments.
+    """
+
+    model = adapter.model
+    if not all(hasattr(model, attr) for attr in ("preprocess_image", "backbone", "neck", "transformer")):
+        raise TypeError("Raw-output extraction requires a local detrex detector with backbone/neck/transformer.")
+    try:
+        model_device = next(model.parameters()).device
+    except StopIteration:
+        model_device = torch.device("cpu")
+    device_ctx = torch.cuda.device(model_device) if model_device.type == "cuda" else nullcontext()
+
+    with device_ctx:
+        images = model.preprocess_image(inputs)
+        batch_size, _, H, W = images.tensor.shape
+        img_masks = images.tensor.new_zeros(batch_size, H, W)
+
+        features = model.backbone(images.tensor)
+        multi_level_feats = model.neck(features)
+        multi_level_masks = []
+        multi_level_position_embeddings = []
+        for feat in multi_level_feats:
+            multi_level_masks.append(
+                torch.nn.functional.interpolate(img_masks[None], size=feat.shape[-2:]).to(torch.bool).squeeze(0)
+            )
+            multi_level_position_embeddings.append(model.position_embedding(multi_level_masks[-1]))
+
+        query_embeds = None
+        if not bool(getattr(model, "as_two_stage", False)):
+            query_embeds = model.query_embedding.weight
+
+        (
+            inter_states,
+            init_reference,
+            inter_references,
+            enc_outputs_class,
+            enc_outputs_coord_unact,
+            anchors,
+        ) = model.transformer(
+            multi_level_feats,
+            multi_level_masks,
+            multi_level_position_embeddings,
+            query_embeds,
+        )
+
+        outputs_classes = []
+        outputs_coords = []
+        for lvl in range(inter_states.shape[0]):
+            reference = init_reference if lvl == 0 else inter_references[lvl - 1]
+            reference = inverse_sigmoid(reference)
+            outputs_class = model.class_embed[lvl](inter_states[lvl])
+            tmp = model.bbox_embed[lvl](inter_states[lvl])
+            if reference.shape[-1] == 4:
+                tmp += reference
+            else:
+                tmp[..., :2] += reference
+            outputs_coord = tmp.sigmoid()
+            outputs_classes.append(outputs_class)
+            outputs_coords.append(outputs_coord)
+        outputs_class = torch.stack(outputs_classes)
+        outputs_coord = torch.stack(outputs_coords)
+
+        final_logits = outputs_class[-1]
+        final_boxes = outputs_coord[-1]
+        aux_outputs = model._set_aux_loss(outputs_class, outputs_coord) if model.aux_loss else None
+
+        enc_outputs = None
+        if bool(getattr(model, "as_two_stage", False)) and enc_outputs_class is not None and enc_outputs_coord_unact is not None:
+            enc_outputs = {
+                "pred_logits": enc_outputs_class,
+                "pred_boxes": enc_outputs_coord_unact.sigmoid(),
+            }
+            if anchors is not None:
+                enc_outputs["anchors"] = anchors
+
+        raw_outputs: list[dict[str, Any]] = []
+        for batch_index in range(batch_size):
+            raw_output = {
+                "pred_logits": _maybe_detach_tensor(final_logits[batch_index], detach_to_cpu=detach_to_cpu),
+                "pred_boxes": _maybe_detach_tensor(final_boxes[batch_index], detach_to_cpu=detach_to_cpu),
+            }
+            if aux_outputs is not None:
+                raw_output["aux_outputs"] = [
+                    {
+                        "pred_logits": _maybe_detach_tensor(
+                            aux_output["pred_logits"][batch_index],
+                            detach_to_cpu=detach_to_cpu,
+                        ),
+                        "pred_boxes": _maybe_detach_tensor(
+                            aux_output["pred_boxes"][batch_index],
+                            detach_to_cpu=detach_to_cpu,
+                        ),
+                    }
+                    for aux_output in aux_outputs
+                ]
+            if enc_outputs is not None:
+                raw_output["enc_outputs"] = {
+                    key: _maybe_detach_tensor(value[batch_index], detach_to_cpu=detach_to_cpu)
+                    if torch.is_tensor(value) and value.shape[0] == batch_size
+                    else value
+                    for key, value in enc_outputs.items()
+                }
+            raw_outputs.append(raw_output)
+    return raw_outputs
+
+
+def _run_raw_outputs_for_adapter(
+    adapter: DetrexAdapter,
+    inputs: list[dict[str, Any]],
+    *,
+    detach_to_cpu: bool,
+) -> list[dict[str, Any]]:
+    model_name = adapter.config.model_name.lower()
+    if model_name.startswith("deta"):
+        return _run_deta_raw_outputs(adapter, inputs, detach_to_cpu=detach_to_cpu)
+    return _run_dino_raw_outputs(adapter, inputs, detach_to_cpu=detach_to_cpu)
+
+
 def select_dino_topk(raw_output: dict[str, Any], image_size: tuple[int, int], topk: int) -> list[dict[str, Any]]:
     """Select final DINO detections together with raw logits and aux-layer traces.
 
@@ -409,13 +547,13 @@ def run_daod_raw_outputs(
     *,
     with_grad: bool = False,
 ) -> list[dict[str, Any]]:
-    """Run the DINO raw-output path and optionally keep gradients on the outputs."""
+    """Run detector raw outputs and optionally keep gradients on the outputs."""
 
     inputs = prepare_daod_inputs(adapter, batch)
     if with_grad:
-        return _run_dino_raw_outputs(adapter, inputs, detach_to_cpu=False)
+        return _run_raw_outputs_for_adapter(adapter, inputs, detach_to_cpu=False)
     with torch.no_grad():
-        return _run_dino_raw_outputs(adapter, inputs, detach_to_cpu=True)
+        return _run_raw_outputs_for_adapter(adapter, inputs, detach_to_cpu=True)
 
 
 def run_daod_inference(
@@ -456,7 +594,7 @@ def run_daod_inference_with_raw(
     inputs = prepare_daod_inputs(adapter, samples)
     with torch.no_grad():
         processed_outputs = adapter.model(inputs)
-        raw_outputs = _run_dino_raw_outputs(adapter, inputs, detach_to_cpu=True)
+        raw_outputs = _run_raw_outputs_for_adapter(adapter, inputs, detach_to_cpu=True)
 
     return [
         {
