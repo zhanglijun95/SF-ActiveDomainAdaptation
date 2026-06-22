@@ -4,8 +4,27 @@ __pycache__/
 *$py.class
 doc/
 runs/
-external/
 configs/
+
+# External reference repositories are usually not tracked by the main repo.
+# detrex is vendored because the DAOD detector adapter and SageMaker image
+# build depend on the local detrex source tree plus a small DETA inference patch.
+external/*
+!external/detrex/
+!external/detrex/**
+external/detrex/.git/
+external/detrex/.git-vendor-backup/
+external/detrex/**/.git
+external/detrex/**/.git/
+external/detrex/ckpts/
+external/detrex/**/__pycache__/
+external/detrex/**/*.py[codz]
+external/detrex/**/*.so
+external/detrex/**/build/
+external/detrex/**/*.egg-info/
+external/detrex/.pytest_cache/
+external/detrex/demo_output.jpg
+external/detrex/idea.png
 
 # C extensions
 *.so
