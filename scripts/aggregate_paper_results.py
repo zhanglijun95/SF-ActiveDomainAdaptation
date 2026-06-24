@@ -54,6 +54,7 @@ class RunRecord:
     seed: int | None
     exp_name: str
     run_dir: str
+    metric_source: str
     ap50: float
     ap: float
     ap75: float | None
@@ -150,9 +151,26 @@ def _classify(exp_name: str) -> tuple[str, str, float | None]:
 def _record_priority(record: RunRecord) -> int:
     """Prefer corrected full BDD reruns over the earlier broken BDD configs."""
     lower = record.exp_name.lower()
+    metric_priority = {
+        "best_intermediate": 1,
+        "summary": 2,
+        "student_target_val": 3,
+        "target_val": 4,
+    }.get(record.metric_source, 0)
+    exp_priority = 1
     if "_dynfix_" in lower or "_bddfix_" in lower or "_static_anchor_" in lower or "_officialdt_" in lower:
-        return 2
-    return 1
+        exp_priority = 2
+    return exp_priority * 10 + metric_priority
+
+
+def _metric_source(path: Path) -> str:
+    if path.name == "best_student_target_val_metrics.json":
+        return "best_intermediate"
+    if path.name == "student_target_val_metrics.json":
+        return "student_target_val"
+    if path.name == "summary.json":
+        return "summary"
+    return "target_val"
 
 
 def _baseline_bbox(path: Path) -> dict[str, Any]:
@@ -197,6 +215,7 @@ def _record_from_baseline_metrics(path: Path) -> RunRecord | None:
         seed=_seed(exp_name),
         exp_name=exp_name,
         run_dir=str(path.parent),
+        metric_source=_metric_source(path),
         ap50=ap50,
         ap=ap,
         ap75=_float(metrics.get("AP75")),
@@ -224,6 +243,7 @@ def _anchor_records(root: Path, family: str, method: str) -> list[RunRecord]:
                 seed=None,
                 exp_name=method,
                 run_dir=str(path.parent),
+                metric_source="target_val",
                 ap50=ap50,
                 ap=ap,
                 ap75=_float(metrics.get("AP75")),
@@ -234,14 +254,28 @@ def _anchor_records(root: Path, family: str, method: str) -> list[RunRecord]:
 
 def _scan_records() -> list[RunRecord]:
     records: list[RunRecord] = []
-    baseline_run_dirs_with_target_json: set[Path] = set()
+    baseline_run_dirs_with_final_metrics: set[Path] = set()
     for path in sorted(Path("runs/baselines").glob("*/*/*/*/target_val_metrics.json")):
         record = _record_from_baseline_metrics(path)
         if record is not None:
             records.append(record)
-            baseline_run_dirs_with_target_json.add(path.parent)
+            baseline_run_dirs_with_final_metrics.add(path.parent)
+    for path in sorted(Path("runs/baselines").glob("*/*/*/*/student_target_val_metrics.json")):
+        if path.parent in baseline_run_dirs_with_final_metrics:
+            continue
+        record = _record_from_baseline_metrics(path)
+        if record is not None:
+            records.append(record)
+            baseline_run_dirs_with_final_metrics.add(path.parent)
     for path in sorted(Path("runs/baselines").glob("*/*/*/*/summary.json")):
-        if path.parent in baseline_run_dirs_with_target_json:
+        if path.parent in baseline_run_dirs_with_final_metrics:
+            continue
+        record = _record_from_baseline_metrics(path)
+        if record is not None:
+            records.append(record)
+            baseline_run_dirs_with_final_metrics.add(path.parent)
+    for path in sorted(Path("runs/baselines").glob("*/*/*/*/best_student_target_val_metrics.json")):
+        if path.parent in baseline_run_dirs_with_final_metrics:
             continue
         record = _record_from_baseline_metrics(path)
         if record is not None:
@@ -280,6 +314,21 @@ def _seed_values(records: list[RunRecord], attr: str) -> str:
         seed = "NA" if record.seed is None else str(record.seed)
         pairs.append(f"s{seed}={value:.3f}")
     return ", ".join(pairs)
+
+
+def _seed_sources(records: list[RunRecord]) -> str:
+    pairs = []
+    for record in sorted(records, key=lambda row: (-1 if row.seed is None else row.seed)):
+        seed = "NA" if record.seed is None else str(record.seed)
+        pairs.append(f"s{seed}={record.metric_source}")
+    return ", ".join(pairs)
+
+
+def _source_counts(records: list[RunRecord]) -> str:
+    counts: dict[str, int] = defaultdict(int)
+    for record in records:
+        counts[record.metric_source] += 1
+    return ", ".join(f"{name}={counts[name]}" for name in sorted(counts))
 
 
 def _aggregate(records: list[RunRecord]) -> list[dict[str, Any]]:
@@ -336,6 +385,8 @@ def _aggregate(records: list[RunRecord]) -> list[dict[str, Any]]:
                 "AP75_std": _std(ap75s),
                 "seed_AP50": _seed_values(group, "ap50"),
                 "seed_AP": _seed_values(group, "ap"),
+                "metric_sources": _source_counts(group),
+                "seed_metric_sources": _seed_sources(group),
                 "run_dirs": " | ".join(sorted(record.run_dir for record in group)),
             }
         )
@@ -423,6 +474,8 @@ CSV_COLUMNS = [
     "oracle_gap_closed_pct",
     "seed_AP50",
     "seed_AP",
+    "metric_sources",
+    "seed_metric_sources",
     "run_dirs",
 ]
 
@@ -433,6 +486,7 @@ DISPLAY_COLUMNS = [
     "method",
     "label_ratio",
     "n",
+    "metric_sources",
     "AP50_mean",
     "AP50_std",
     "AP_mean",

@@ -13,6 +13,8 @@ import numpy as np
 METHODS = ["PETS", "LPU", "LPLD", "DDT"]
 PURE_SFDA = np.array([46.520, 48.695, 47.043, 53.669])
 RTSM = np.array([52.885, 53.420, 55.321, 58.695])
+SOURCE_ONLY = 32.608
+FULL_TARGET_ORACLE = 62.507
 
 
 def parse_args() -> argparse.Namespace:
@@ -64,8 +66,31 @@ def main() -> None:
     markers = {"PETS": "o", "LPU": "s", "LPLD": "^", "DDT": "D"}
     label_offsets = {"PETS": -0.55, "LPU": 0.35, "LPLD": 0.18, "DDT": 0.12}
 
-    fig, ax = plt.subplots(figsize=(2.55, 1.78))
+    fig, ax = plt.subplots(figsize=(2.65, 1.90))
     x = np.array([0, 1])
+    reference_color = "#6E6E6E"
+
+    for value, label in [
+        (SOURCE_ONLY, "Source-Only"),
+        (FULL_TARGET_ORACLE, "Full-Target Oracle"),
+    ]:
+        ax.axhline(
+            value,
+            color=reference_color,
+            linewidth=1.0,
+            linestyle=(0, (3.0, 2.0)),
+            zorder=1,
+        )
+        ax.text(
+            -0.055,
+            value + 0.45,
+            label,
+            color=reference_color,
+            fontsize=6.5,
+            va="bottom",
+            ha="left",
+            bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.82, "pad": 0.4},
+        )
 
     for method, pure, rtsm in zip(METHODS, PURE_SFDA, RTSM):
         y = np.array([pure, rtsm])
@@ -88,10 +113,10 @@ def main() -> None:
         )
 
     ax.set_xlim(-0.08, 1.36)
-    ax.set_ylim(45.0, 60.5)
+    ax.set_ylim(30.0, 64.0)
     ax.set_xticks(x)
     ax.set_xticklabels(["Pure\nSFDA", "RTSM\n(+5% labels)"])
-    ax.set_yticks([45, 50, 55, 60])
+    ax.set_yticks([30, 40, 50, 60])
     ax.set_ylabel("AP50")
     ax.tick_params(axis="both", length=2.5, pad=2)
     ax.grid(axis="x", visible=False)
