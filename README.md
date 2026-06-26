@@ -1,4 +1,4 @@
-# SFADA
+# SFADA-OD
 
 This repository contains source-free domain adaptation experiments for object
 detection, including DINO/DETA-based DAOD training, SFOD baselines, sparse
